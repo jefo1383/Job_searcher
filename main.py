@@ -12,11 +12,15 @@ from core.generator import JobGenerator
 from db.database import JobDatabase
 from db.models import JobStatus
 from hitl.telegram_bot import JobHunterBot
+from scrapers.bpce import BpceScraper
 from scrapers.cma_cgm import CMACGMScraper
 from scrapers.engine import ScraperEngine
 from scrapers.france_travail import FranceTravailScraper
 from scrapers.hellowork import HelloWorkScraper
 from scrapers.indeed import IndeedScraper
+from scrapers.orange_cyberdefense import OrangeCyberScraper
+from scrapers.vinci import VinciScraper
+from scrapers.workday import AirbusScraper, FDJScraper, ThalesScraper
 from scrapers.wttj import WTTJScraper
 
 # Mots-clés par défaut alignés sur le profil du candidat
@@ -86,13 +90,19 @@ class JobHunterOrchestrator:
             chat_id=self.settings.telegram_chat_id,
         )
 
-        # 4. Moteur de scraping multi-sources
+        # 4. Moteur de scraping multi-sources (Job boards + Portails ATS cibles)
         self.scraper_engine = ScraperEngine(db=self.db)
         self.scraper_engine.register_scraper(WTTJScraper())
         self.scraper_engine.register_scraper(FranceTravailScraper())
         self.scraper_engine.register_scraper(CMACGMScraper())
         self.scraper_engine.register_scraper(HelloWorkScraper())
         self.scraper_engine.register_scraper(IndeedScraper())
+        self.scraper_engine.register_scraper(AirbusScraper())
+        self.scraper_engine.register_scraper(ThalesScraper())
+        self.scraper_engine.register_scraper(FDJScraper())
+        self.scraper_engine.register_scraper(OrangeCyberScraper())
+        self.scraper_engine.register_scraper(BpceScraper())
+        self.scraper_engine.register_scraper(VinciScraper())
 
     async def run_pipeline_cycle(
         self,

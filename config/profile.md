@@ -84,7 +84,8 @@ The candidate is actively seeking and will only accept the following contract ty
 ### Geographic Scope & Remote Policy
 - **Primary Location:** Bouches-du-Rhône (13), France (Marseille, Aix-en-Provence, Allauch, Aubagne, Vitrolles, Marignane, etc.).
 - **On-site / Hybrid / Remote:**
-  - On-site in Bouches-du-Rhône (13) is fully accepted.
+  - On-site in Bouches-du-Rhône (13) is fully accepted (Marseille, Aix, Aubagne, Vitrolles, Marignane, La Ciotat).
+  - Geographic exclusion: Istres and West of Étang de Berre are too far (exclude Dassault Aviation / Istres on-site).
   - Hybrid or Full-remote is welcomed but not mandatory.
   - Jobs located exclusively on-site outside of Bouches-du-Rhône (e.g. Paris, Lyon, Toulouse on-site) without full-remote must be marked as not matching.
 
