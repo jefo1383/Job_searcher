@@ -201,8 +201,12 @@ class JobAnalyzer:
         company: str,
         description: str,
         platform: str = "",
+        max_missing_skills_percent: int = 50,
     ) -> tuple[JobAnalysisResult, bool]:
         """Analyze job and decide whether it qualifies for human review.
+
+        Evaluates relevance score against score_threshold, and enforces the
+        maximum percentage limit on missing skills.
 
         Args:
             score_threshold: Minimum score required for qualification.
@@ -210,6 +214,7 @@ class JobAnalyzer:
             company: Hiring organization name.
             description: Job description text.
             platform: Scraped platform source.
+            max_missing_skills_percent: Max allowed ratio of missing skills.
 
         Returns:
             tuple[JobAnalysisResult, bool]: Result and qualification boolean.
@@ -220,5 +225,15 @@ class JobAnalyzer:
             description=description,
             platform=platform,
         )
+
+        # Vérification du score et de l'adéquation globale
         is_qualified = result.is_match and result.score >= score_threshold
+
+        # Contrôle du ratio de compétences manquantes (ex: max 50%)
+        total_skills = len(result.key_matches) + len(result.missing_skills)
+        if total_skills > 0:
+            missing_ratio = (len(result.missing_skills) / total_skills) * 100
+            if missing_ratio > max_missing_skills_percent:
+                is_qualified = False
+
         return result, is_qualified

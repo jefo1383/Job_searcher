@@ -86,6 +86,10 @@ class Settings(BaseSettings):
         raise ValueError(f"Invalid telegram_chat_id: {value}")
 
     # Chemins des fichiers et répertoires de données
+    profile_dir: Path = Field(
+        default=PROJECT_ROOT / "Profile",
+        description="Unified candidate profile folder (CV, criteria, profile.md).",
+    )
     database_path: Path = Field(
         default=PROJECT_ROOT / "data" / "jobs.db",
         description="SQLite database path.",
@@ -94,8 +98,12 @@ class Settings(BaseSettings):
         default=PROJECT_ROOT / "config" / "profile.md",
         description="Candidate profile markdown path.",
     )
+    search_criteria_path: Path = Field(
+        default=PROJECT_ROOT / "Profile" / "search_criteria.txt",
+        description="Search criteria text configuration path.",
+    )
     resume_pdf_path: Path = Field(
-        default=PROJECT_ROOT / "Resume Jérémy Foeller.pdf",
+        default=PROJECT_ROOT / "Profile" / "Resume Jérémy Foeller.pdf",
         description="Candidate resume PDF file path.",
     )
     chrome_user_data_dir: Path = Field(
@@ -104,8 +112,10 @@ class Settings(BaseSettings):
     )
 
     @field_validator(
+        "profile_dir",
         "database_path",
         "candidate_profile_path",
+        "search_criteria_path",
         "resume_pdf_path",
         "chrome_user_data_dir",
         mode="after",

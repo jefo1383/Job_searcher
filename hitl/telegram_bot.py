@@ -16,6 +16,7 @@ from telegram.ext import (
 from automation.browser_runner import BrowserRunner, CandidateDetails
 from config.settings import get_settings
 from core.analyzer import JobAnalysisResult
+from core.profile_builder import ProfileBuilder
 from db.database import JobDatabase
 from db.models import JobRecord, JobStatus
 
@@ -35,6 +36,7 @@ class JobHunterBot:
         bot_token: str | None = None,
         chat_id: int | None = None,
         browser_runner: BrowserRunner | None = None,
+        profile_builder: ProfileBuilder | None = None,
     ) -> None:
         """Initialize the bot with settings and command handlers.
 
@@ -43,6 +45,7 @@ class JobHunterBot:
             bot_token: Telegram Bot API token (defaults to settings).
             chat_id: Telegram target user chat ID (defaults to settings).
             browser_runner: Browser automation runner for HITL actions.
+            profile_builder: Profile generator for resume sync.
 
         Raises:
             ValueError: If bot_token is empty or invalid.
@@ -64,6 +67,7 @@ class JobHunterBot:
             chat_id if chat_id is not None else settings.telegram_chat_id
         )
         self.browser_runner = browser_runner or BrowserRunner()
+        self.profile_builder = profile_builder
         self.candidate_details = CandidateDetails()
 
         # Construction de l'application Telegram avec initialisation de la base
@@ -98,6 +102,9 @@ class JobHunterBot:
         )
         self.application.add_handler(
             CommandHandler("pending", self._cmd_pending)
+        )
+        self.application.add_handler(
+            CommandHandler("update_profile", self._cmd_update_profile)
         )
 
         # Gestionnaire de clics sur boutons interactifs
@@ -153,7 +160,8 @@ class JobHunterBot:
             f"Votre chat ID est : <code>{chat_id}</code>\n\n"
             "📋 <b>Commandes disponibles :</b>\n"
             "• /stats : Statistiques des offres en base de données.\n"
-            "• /pending : Liste des offres en attente de décision.\n\n"
+            "• /pending : Liste des offres en attente de décision.\n"
+            "• /update_profile : Analyse le CV et régénère profile.md.\n\n"
             "Dès qu'une offre dépasse votre seuil de pertinence, vous "
             "recevrez une alerte avec 3 boutons d'action 1-clic."
         )
@@ -161,6 +169,48 @@ class JobHunterBot:
         await update.message.reply_text(
             welcome_text, parse_mode=ParseMode.HTML
         )
+
+    async def _cmd_update_profile(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /update_profile command to regenerate candidate profile."""
+        if not update.effective_chat or not update.message:
+            return
+
+        if not self._is_authorized(update.effective_chat.id):
+            await update.message.reply_text("⛔ Accès non autorisé.")
+            return
+
+        if self.profile_builder is None:
+            await update.message.reply_text(
+                "⚠️ Module ProfileBuilder non disponible."
+            )
+            return
+
+        status_msg = await update.message.reply_text(
+            "⏳ Analyse de votre CV dans Profile/ et régénération de "
+            "profile.md via Gemini Flash..."
+        )
+
+        try:
+            regenerated = await self.profile_builder.sync_profile(force=True)
+            if regenerated:
+                await status_msg.edit_text(
+                    "✅ <b>Profil candidat régénéré avec succès !</b>\n"
+                    "Le fichier <code>config/profile.md</code> a été mis à "
+                    "jour à partir de votre CV et de vos critères.",
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                await status_msg.edit_text(
+                    "ℹ️ Aucun fichier de CV (.pdf ou .docx) trouvé dans le "
+                    "dossier <code>Profile/</code>.",
+                    parse_mode=ParseMode.HTML,
+                )
+        except Exception as err:
+            await status_msg.edit_text(
+                f"❌ Erreur lors de la régénération du profil : {err}"
+            )
 
     async def _cmd_stats(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

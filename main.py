@@ -6,9 +6,11 @@ from collections.abc import Sequence
 import sys
 from typing import Any
 
+from config.criteria import parse_search_criteria_file
 from config.settings import Settings, get_settings
 from core.analyzer import JobAnalyzer
 from core.generator import JobGenerator
+from core.profile_builder import ProfileBuilder
 from db.database import JobDatabase
 from db.models import JobStatus
 from hitl.telegram_bot import JobHunterBot
@@ -83,14 +85,18 @@ class JobHunterOrchestrator:
             profile_path=self.settings.candidate_profile_path,
         )
 
-        # 3. Interface Human-in-the-Loop Telegram
+        # 3. Moteur d'analyse du CV et de génération du profil candidat
+        self.profile_builder = ProfileBuilder(settings=self.settings)
+
+        # 4. Interface Human-in-the-Loop Telegram
         self.bot = JobHunterBot(
             db=self.db,
             bot_token=self.settings.telegram_bot_token.get_secret_value(),
             chat_id=self.settings.telegram_chat_id,
+            profile_builder=self.profile_builder,
         )
 
-        # 4. Moteur de scraping multi-sources (Job boards + Portails ATS cibles)
+        # 5. Moteur de scraping multi-sources (Job boards + Portails ATS cibles)
         self.scraper_engine = ScraperEngine(db=self.db)
         self.scraper_engine.register_scraper(WTTJScraper())
         self.scraper_engine.register_scraper(FranceTravailScraper())
@@ -106,24 +112,41 @@ class JobHunterOrchestrator:
 
     async def run_pipeline_cycle(
         self,
-        keywords: list[str],
-        locations: list[str],
+        keywords: list[str] | None = None,
+        locations: list[str] | None = None,
         limit_per_source: int = 20,
     ) -> int:
         """Execute one complete cycle: scrape, evaluate, pitch, and notify.
 
+        Dynamically loads criteria from search_criteria.txt, falling back to
+        provided arguments or application defaults.
+
         Args:
-            keywords: Target search terms.
-            locations: Geographical filters.
+            keywords: Optional override search terms.
+            locations: Optional override geographical filters.
             limit_per_source: Max listings queried per scraper.
 
         Returns:
             int: Count of newly qualified offers notified via Telegram.
         """
+        # Rechargement dynamique des critères depuis le fichier texte
+        criteria = parse_search_criteria_file(
+            self.settings.search_criteria_path
+        )
+        active_keywords = keywords or criteria.keywords or DEFAULT_KEYWORDS
+        active_locations = locations or criteria.locations or DEFAULT_LOCATIONS
+
+        # Mise à jour du modèle pour injecter les mots-clés et villes actives
+        active_criteria = criteria.model_copy(
+            update={
+                "keywords": active_keywords,
+                "locations": active_locations,
+            }
+        )
+
         print("\n🚀 [Cycle] Démarrage de la collecte d'offres d'emploi...")
-        new_jobs = await self.scraper_engine.collect_jobs(
-            keywords=keywords,
-            locations=locations,
+        new_jobs = await self.scraper_engine.collect_from_criteria(
+            criteria=active_criteria,
             limit_per_source=limit_per_source,
         )
         print(f"📦 [Cycle] {len(new_jobs)} nouvelle(s) offre(s) insérée(s).")
@@ -138,7 +161,9 @@ class JobHunterOrchestrator:
 
         print(
             f"🧠 [Cycle] Évaluation de {len(pending_eval_jobs)} offre(s) "
-            f"par Gemini Flash..."
+            f"par Gemini Flash (Seuil: "
+            f"{active_criteria.match_score_threshold}/100, "
+            f"Max manquantes: {active_criteria.max_missing_skills_percent}%)..."
         )
         qualified_count = 0
 
@@ -147,14 +172,17 @@ class JobHunterOrchestrator:
                 continue
 
             try:
-                # Évaluation stricte du poste par rapport au profil candidat
+                # Évaluation stricte du poste avec seuils configurables
                 eval_res, is_qualified = (
                     await self.analyzer.evaluate_and_decide_status(
-                        score_threshold=self.settings.match_score_threshold,
+                        score_threshold=active_criteria.match_score_threshold,
                         title=job.title,
                         company=job.company,
                         description=job.description,
                         platform=job.platform,
+                        max_missing_skills_percent=(
+                            active_criteria.max_missing_skills_percent
+                        ),
                     )
                 )
 
@@ -211,8 +239,8 @@ class JobHunterOrchestrator:
     async def run_periodic_watcher(
         self,
         interval_hours: float,
-        keywords: list[str],
-        locations: list[str],
+        keywords: list[str] | None = None,
+        locations: list[str] | None = None,
         limit_per_source: int = 20,
     ) -> None:
         """Run periodic watch loop with scheduled sleep intervals.
@@ -245,6 +273,7 @@ class JobHunterOrchestrator:
         self,
         once: bool = False,
         bot_only: bool = False,
+        update_profile: bool = False,
         interval_hours: float = 168.0,
         keywords: list[str] | None = None,
         locations: list[str] | None = None,
@@ -255,12 +284,30 @@ class JobHunterOrchestrator:
         Args:
             once: If True, execute one collection cycle and exit.
             bot_only: If True, only launch interactive Telegram bot.
+            update_profile: If True, force profile.md regeneration from CV.
             interval_hours: Hours between automated scraping cycles.
             keywords: Custom search keywords list.
             locations: Custom geographical locations list.
             limit_per_source: Max results per scraper.
         """
-        # Initialisation de la persistance SQLite
+        # 1. Vérification et synchronisation automatique du profil candidat
+        profile_regenerated = await self.profile_builder.sync_profile(
+            force=update_profile
+        )
+        if profile_regenerated:
+            # Rechargement de l'analyseur et du générateur avec le profil frais
+            self.analyzer = JobAnalyzer(
+                api_key=self.settings.gemini_api_key.get_secret_value(),
+                model_name=self.settings.gemini_model,
+                profile_path=self.settings.candidate_profile_path,
+            )
+            self.generator = JobGenerator(
+                api_key=self.settings.gemini_api_key.get_secret_value(),
+                model_name=self.settings.gemini_model,
+                profile_path=self.settings.candidate_profile_path,
+            )
+
+        # 2. Initialisation de la persistance SQLite
         await self.db.init_db()
 
         target_keywords = keywords or DEFAULT_KEYWORDS
@@ -339,6 +386,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Only launch Telegram bot to answer commands without scraping.",
     )
     parser.add_argument(
+        "--update-profile",
+        action="store_true",
+        dest="update_profile",
+        help="Force profile.md regeneration from the latest CV in Profile/.",
+    )
+    parser.add_argument(
         "--interval-hours",
         type=float,
         default=168.0,
@@ -371,6 +424,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             orchestrator.start(
                 once=args.once,
                 bot_only=args.bot_only,
+                update_profile=args.update_profile,
                 interval_hours=args.interval_hours,
                 limit_per_source=args.limit,
             )

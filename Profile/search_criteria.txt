@@ -1,0 +1,74 @@
+# ==============================================================================
+# JOB HUNTER BOT - CRITÈRES DE RECHERCHE & PARAMÈTRES
+# ==============================================================================
+# Ce fichier peut être ouvert et modifié avec le Bloc-notes (Windows),
+# TextEdit (Mac) ou n'importe quel éditeur Linux (Gedit, Nano, Vim).
+# Les lignes commençant par # ou ; sont des commentaires et sont ignorées.
+# ==============================================================================
+
+[THRESHOLDS]
+# Score minimum calculé par Gemini (entre 0 et 100) pour alerter sur Telegram
+match_score_threshold = 75
+
+# Pourcentage maximum de compétences manquantes tolérées sur l'offre (ex: 50%)
+# Si l'offre exige 6 compétences clés et qu'il en manque 4 (66%), elle sera rejetée.
+max_missing_skills_percent = 50
+
+
+[KEYWORDS]
+# Intitulés de postes et compétences cibles (1 par ligne)
+Ingénieur IA
+Développeur Backend
+Software Engineer
+Python
+DevOps
+DevSecOps
+Analyste SOC
+CSIRT
+Auditeur Sécurité
+Pentesteur Junior
+Cybersécurité
+Systèmes
+
+
+[LOCATIONS]
+# Départements, villes et modalités acceptées (1 par ligne)
+13
+Marseille
+Aix-en-Provence
+Vitrolles
+Marignane
+Aubagne
+La Ciotat
+Allauch
+Remote
+Télétravail
+
+
+[CONTRACTS]
+# Types de contrats acceptés (1 par ligne)
+Alternance
+CDI
+CDD
+Intérim
+
+
+[TARGET_COMPANIES]
+# Entreprises cibles prioritaires
+Airbus
+Thales
+CMA CGM
+Groupe FDJ
+Orange Cyberdefense
+Groupe BPCE
+Vinci
+
+
+[CUSTOM_URLS]
+# Ajoute ici des URLs de sites carrières ou jobboards externes spécifiques.
+# Si l'URL n'a pas de connecteur dédié, le scraper universel Playwright
+# prendra automatiquement le relais pour inspecter la page et extraire les offres.
+# Exemples :
+# https://jobs.greenhouse.io/nom-entreprise
+# https://apply.workable.com/nom-entreprise
+
