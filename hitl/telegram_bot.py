@@ -277,34 +277,65 @@ class JobHunterBot:
             disable_web_page_preview=True,
         )
 
-    def _build_alert_markup(self, job_id: int) -> InlineKeyboardMarkup:
-        """Create the 3-button inline interactive keyboard.
+    def _build_alert_markup(
+        self,
+        job_id: int,
+        is_easy_apply: bool = True,
+        offer_url: str | None = None,
+    ) -> InlineKeyboardMarkup:
+        """Create the inline interactive keyboard adapted to application mode.
 
         Args:
             job_id: SQLite primary key of the job.
+            is_easy_apply: Whether the posting supports 1-click in-app apply.
+            offer_url: Target URL of the job posting or external ATS portal.
 
         Returns:
             InlineKeyboardMarkup: Formed Telegram keyboard.
         """
-        # Boutons d'action conformes aux spécifications
-        keyboard = [
-            [
+        # Boutons d'action adaptés selon Easy Apply ou redirection ATS
+        if is_easy_apply:
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "🚀 Postuler Direct",
+                        callback_data=f"apply:{job_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "📝 Pré-remplir",
+                        callback_data=f"fill:{job_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ Ignorer",
+                        callback_data=f"reject:{job_id}",
+                    ),
+                ],
+            ]
+        else:
+            action_row: list[InlineKeyboardButton] = [
                 InlineKeyboardButton(
-                    "🚀 Postuler Direct",
-                    callback_data=f"apply:{job_id}",
-                ),
-                InlineKeyboardButton(
-                    "📝 Pré-remplir",
+                    "📝 Pré-remplir sur l'ATS",
                     callback_data=f"fill:{job_id}",
                 ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "❌ Ignorer",
-                    callback_data=f"reject:{job_id}",
-                ),
-            ],
-        ]
+            ]
+            if offer_url:
+                action_row.append(
+                    InlineKeyboardButton(
+                        "🌐 Voir l'offre",
+                        url=offer_url,
+                    )
+                )
+            keyboard = [
+                action_row,
+                [
+                    InlineKeyboardButton(
+                        "❌ Ignorer",
+                        callback_data=f"reject:{job_id}",
+                    ),
+                ],
+            ]
         return InlineKeyboardMarkup(keyboard)
 
     def format_alert_message(
@@ -372,8 +403,23 @@ class JobHunterBot:
         if job.id is None:
             return False
 
+        # Détection si candidature simplifiée ou redirection ATS externe
+        is_easy = True
+        apply_url: str | None = None
+        if job.raw_payload:
+            if "is_easy_apply" in job.raw_payload:
+                is_easy = bool(job.raw_payload.get("is_easy_apply"))
+            raw_apply = job.raw_payload.get("apply_url")
+            if isinstance(raw_apply, str) and raw_apply:
+                apply_url = raw_apply
+
+        target_url = apply_url or job.url
         text = self.format_alert_message(job, analysis, pitch)
-        markup = self._build_alert_markup(job.id)
+        markup = self._build_alert_markup(
+            job_id=job.id,
+            is_easy_apply=is_easy,
+            offer_url=target_url,
+        )
 
         try:
             await self.application.bot.send_message(
@@ -428,9 +474,15 @@ class JobHunterBot:
             status_label = (
                 "📝 <b>ACTION : Navigateur ouvert avec pré-remplissage !</b>"
             )
+            target_url = job.url
+            if job.raw_payload:
+                raw_apply = job.raw_payload.get("apply_url")
+                if isinstance(raw_apply, str) and raw_apply:
+                    target_url = raw_apply
+
             asyncio.create_task(
                 self.browser_runner.open_and_prefill_job(
-                    url=job.url,
+                    url=target_url,
                     candidate=self.candidate_details,
                 )
             )

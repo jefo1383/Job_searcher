@@ -1,5 +1,6 @@
 """LLM-based job match analysis module using Google GenAI SDK."""
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from google import genai
@@ -165,34 +166,51 @@ class JobAnalyzer:
             system_instruction=self._build_system_instruction(),
         )
 
-        try:
-            # Appel asynchrone non-bloquant à l'API Gemini Flash
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=user_prompt,
-                config=config,
-            )
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                # Appel asynchrone non-bloquant à l'API Gemini Flash
+                response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=user_prompt,
+                    config=config,
+                )
 
-            # Traitement de l'objet parsé ou validation du texte brut JSON
-            if hasattr(response, "parsed") and response.parsed is not None:
-                parsed_result: Any = response.parsed
-                if isinstance(parsed_result, JobAnalysisResult):
-                    return parsed_result
-                if isinstance(parsed_result, dict):
-                    return JobAnalysisResult.model_validate(parsed_result)
+                # Traitement de l'objet parsé ou validation du texte brut JSON
+                if hasattr(response, "parsed") and response.parsed is not None:
+                    parsed_result: Any = response.parsed
+                    if isinstance(parsed_result, JobAnalysisResult):
+                        return parsed_result
+                    if isinstance(parsed_result, dict):
+                        return JobAnalysisResult.model_validate(parsed_result)
 
-            if response.text:
-                return JobAnalysisResult.model_validate_json(response.text)
+                if response.text:
+                    return JobAnalysisResult.model_validate_json(response.text)
 
-            raise RuntimeError("Gemini returned an empty response body.")
+                raise RuntimeError("Gemini returned an empty response body.")
 
-        except Exception as err:
-            if isinstance(err, (ValueError, RuntimeError)):
-                raise
-            # Encapsulation des erreurs réseau ou de quota Google GenAI
-            raise RuntimeError(
-                f"Failed to evaluate job posting with Gemini: {err}"
-            ) from err
+            except Exception as err:
+                last_err = err
+                err_str = str(err)
+                if (
+                    "503" in err_str
+                    or "429" in err_str
+                    or "UNAVAILABLE" in err_str
+                ) and attempt < 2:
+                    wait_sec = 2.0 * (attempt + 1)
+                    await asyncio.sleep(wait_sec)
+                    continue
+
+                if isinstance(err, (ValueError, RuntimeError)):
+                    raise
+                # Encapsulation des erreurs réseau ou de quota Google GenAI
+                raise RuntimeError(
+                    f"Failed to evaluate job posting with Gemini: {err}"
+                ) from err
+
+        raise RuntimeError(
+            f"Failed to evaluate job posting after retries: {last_err}"
+        )
 
     async def evaluate_and_decide_status(
         self,

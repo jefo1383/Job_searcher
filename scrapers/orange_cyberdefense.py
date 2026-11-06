@@ -94,18 +94,22 @@ class OrangeCyberScraper(BaseScraper):
         Yields:
             RawJobListing: Normalized scraped job post.
         """
+        yielded_count = 0
         async with httpx.AsyncClient(
             headers=DEFAULT_ORANGE_HEADERS,
             timeout=self.timeout_seconds,
             follow_redirects=True,
         ) as client:
             for keyword in keywords:
+                if yielded_count >= limit:
+                    break
+
                 # Paramètres de recherche ciblant la France et l'entité cyber
                 params: dict[str, str | int] = {
                     "keyword": keyword,
                     "lang": "FR",
                     "country": "France",
-                    "limit": min(limit, 20),
+                    "limit": min(limit - yielded_count, 20),
                 }
 
                 try:
@@ -120,6 +124,9 @@ class OrangeCyberScraper(BaseScraper):
                     offers = self._extract_offers_list(data)
 
                     for item in offers:
+                        if yielded_count >= limit:
+                            break
+
                         title = item.get("title", "").strip()
                         raw_loc = self._extract_location(item)
                         offer_id = str(item.get("id", "")).strip()
@@ -161,6 +168,7 @@ class OrangeCyberScraper(BaseScraper):
                             location=raw_loc,
                             raw_payload=item,
                         )
+                        yielded_count += 1
 
                 except Exception as err:
                     print(

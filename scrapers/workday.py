@@ -89,15 +89,19 @@ class WorkdayScraper(BaseScraper):
             f"{self.company_path}/{self.portal_path}/jobs"
         )
 
+        yielded_count = 0
         async with httpx.AsyncClient(
             headers=DEFAULT_WORKDAY_HEADERS,
             timeout=self.timeout_seconds,
             follow_redirects=True,
         ) as client:
             for keyword in keywords:
+                if yielded_count >= limit:
+                    break
+
                 payload: dict[str, Any] = {
                     "appliedFacets": {},
-                    "limit": min(limit, 20),
+                    "limit": min(limit - yielded_count, 20),
                     "offset": 0,
                     "searchText": keyword,
                 }
@@ -114,6 +118,9 @@ class WorkdayScraper(BaseScraper):
                     postings = data.get("jobPostings", [])
 
                     for item in postings:
+                        if yielded_count >= limit:
+                            break
+
                         title = item.get("title", "").strip()
                         locations_text = item.get("locationsText", "").strip()
                         external_path = item.get("externalPath", "").strip()
@@ -151,6 +158,7 @@ class WorkdayScraper(BaseScraper):
                             location=locations_text,
                             raw_payload=item,
                         )
+                        yielded_count += 1
 
                 except Exception as err:
                     print(

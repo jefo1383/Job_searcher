@@ -20,6 +20,7 @@ from scrapers.engine import ScraperEngine
 from scrapers.france_travail import FranceTravailScraper
 from scrapers.hellowork import HelloWorkScraper
 from scrapers.indeed import IndeedScraper
+from scrapers.linkedin import LinkedInScraper
 from scrapers.orange_cyberdefense import OrangeCyberScraper
 from scrapers.vinci import VinciScraper
 from scrapers.workday import AirbusScraper, FDJScraper, ThalesScraper
@@ -103,6 +104,7 @@ class JobHunterOrchestrator:
         self.scraper_engine.register_scraper(CMACGMScraper())
         self.scraper_engine.register_scraper(HelloWorkScraper())
         self.scraper_engine.register_scraper(IndeedScraper())
+        self.scraper_engine.register_scraper(LinkedInScraper())
         self.scraper_engine.register_scraper(AirbusScraper())
         self.scraper_engine.register_scraper(ThalesScraper())
         self.scraper_engine.register_scraper(FDJScraper())
@@ -313,20 +315,25 @@ class JobHunterOrchestrator:
         target_keywords = keywords or DEFAULT_KEYWORDS
         target_locations = locations or DEFAULT_LOCATIONS
 
-        if once:
-            # Mode One-Shot : exécution immédiate sans boucle ni bot persistant
-            await self.run_pipeline_cycle(
-                keywords=target_keywords,
-                locations=target_locations,
-                limit_per_source=limit_per_source,
-            )
-            print("🏁 [Orchestrator] Cycle one-shot terminé.")
-            return
-
-        # Démarrage de l'écoute Telegram en arrière-plan
+        # 3. Initialisation de l'application Telegram
         telegram_app = self.bot.application
         await telegram_app.initialize()
         await telegram_app.start()
+
+        if once:
+            # Mode One-Shot : exécution immédiate sans boucle persistante
+            try:
+                await self.run_pipeline_cycle(
+                    keywords=target_keywords,
+                    locations=target_locations,
+                    limit_per_source=limit_per_source,
+                )
+            finally:
+                await telegram_app.stop()
+                await telegram_app.shutdown()
+            print("🏁 [Orchestrator] Cycle one-shot terminé.")
+            return
+
         updater = telegram_app.updater
         if updater is not None:
             await updater.start_polling()

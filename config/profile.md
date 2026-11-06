@@ -1,116 +1,110 @@
 # Candidate Profile & Job Hunter Directives
 
 ## 1. Candidate Identity & Professional Overview
-
 - **Full Name:** Jérémy Foeller
-- **Current Position:** Software Engineer | AI Systems & Architecture
-- **Education / School:** School 42 Marseille (Common Core in progress)
-- **Location:** Allauch, Bouches-du-Rhône (13), France
-- **Email:** jeremy.foeller@gmail.com
-- **Phone:** +33 6 24 05 81 85
-- **Driver's License:** Yes (Permis B)
-- **LinkedIn:** [linkedin.com/in/jérémy-foeller-95207a70](https://www.linkedin.com/in/jérémy-foeller-95207a70)
-- **GitHub:** [github.com/jefo1383](https://github.com/jefo1383)
-- **Languages:** French (Native), English (Professional Working Proficiency, B2-C1)
-
-### Executive Summary
-Versatile software engineer working across C and Python with a first-principles engineering approach. Specializing in high-performance system architectures, AI-powered product engineering, autonomous LLM agents, and scalable production-grade backends.
-Backed by 10 years of prior entrepreneurial execution, project management, and operational discipline (including earlier military service in the Gendarmerie Nationale), bringing mature leadership, ownership, and high-stress resilience alongside modern technical skills.
+- **Current Location:** Allauch (13190), France (Aix-Marseille Area)
+- **Contact:** +33 6 24 05 81 85 | jeremy.foeller@gmail.com
+- **Links:** 
+  - LinkedIn: https://www.linkedin.com/in/jérémy-foeller-95207a70
+  - GitHub: https://github.com/jefo1383
+- **Current Status & Education:** 
+  - **School 42 Marseille (2025 - Present):** Common Core Curriculum (Software Engineering, C, Python, Low-level Systems, Algorithms, Networks, AI & Infrastructure).
+  - **ESDAC (2014):** Bachelor's Degree in Interior Design.
+  - **Bac S (2006):** High School Diploma in Sciences.
+- **Languages:** French (Native), English (B2-C1).
+- **Licenses & Mobility:** Valid Driver's License; based in 13190 Allauch.
+- **Executive Summary:** 
+  Backed by 10 years of rigorous project management, entrepreneurship, and operational execution (including background in law enforcement/gendarmerie), Jérémy is a software engineer specializing in low-level systems architecture, AI systems/agents, backend infrastructure, and cybersecurity. Demonstrates a first-principles engineering mindset working across C and Python to build high-performance system architectures, autonomous agent frameworks, and secure network infrastructure with end-to-end ownership.
 
 ---
 
 ## 2. Core Technical Competencies
 
-### Languages & Systems
-- **Python 3:** Strict static typing (Mypy), OOP, Functional programming, Pydantic v2, Asyncio.
-- **C:** Strict 42 Norm standards, manual memory management, pointer arithmetic, system calls.
-- **Scripting & Environments:** Bash, Linux (Debian, Alpine), POSIX systems.
+### Languages & Core Programming
+- **C:** Strict 42 standard standards, manual memory management, pointer arithmetic, custom data structures, POSIX system calls.
+- **Python 3:** Strict typing, Object-Oriented Programming (OOP), Functional Programming, Pydantic v2.
+- **Shell & Scripting:** Bash Scripting, Linux System Administration.
 
-### Artificial Intelligence & Autonomous Agents
-- **Autonomous LLM Agents:** Chain-of-Thought reasoning, ReAct patterns, self-healing validation loops.
-- **Advanced RAG Pipelines:** Semantic chunking, dense vector embeddings, re-ranking strategies.
-- **Tool / Function Calling:** Constrained decoding, structured JSON adherence (Pydantic), local SLMs (Qwen 0.6B).
-- **LLM Providers & Ecosystem:** Google AI Studio (Gemini Flash/Pro), Mistral AI, Ollama.
+### Artificial Intelligence & AI Engineering
+- **LLM Agents & Architectures:** Autonomous LLM Agents, Chain-of-Thought (CoT) reasoning, self-healing validation loops.
+- **RAG Infrastructure:** Advanced RAG pipelines (Semantic Chunking, Dense Embeddings, Vector Search, Re-ranking).
+- **Structured Decoding & Tool Calling:** Constrained Decoding, Tool/Function Calling Engines, 100% structured JSON / Pydantic schema enforcement via Small Language Models (SLMs, e.g., Qwen 0.6B).
 
-### DevOps, Networks & Cyber Security
-- **DevOps & Containers:** Docker, Docker Compose, CI/CD pipelines, Git workflows.
-- **Web Servers & Networks:** Nginx (TLS 1.3), TCP sockets, multi-client asynchronous servers, TCP/IP routing.
-- **Security & Systems Hardening:** Encrypted LVM partitions, UFW firewall, SSH hardening, Docker secrets, SOC incident triage.
+### Systems, DevOps, Networking & Security
+- **Infrastructure & Virtualization:** Docker, Docker Compose, Microservices architecture, Container security, Hardened Debian & Alpine Linux.
+- **Network & Protocol Engineering:** TCP Sockets, Multi-client Servers, Custom RFC Protocol Design, ABNF Grammar Parsing, Asynchronous Socket Polling, TCP/IP Routing, Nginx (TLS 1.3 configuration).
+- **Cybersecurity & System Hardening:** Hardened LVM Partitioning, Encrypted Disks, UFW Firewall configuration, SSH Hardening, Docker Secrets management, SOC Incident Triage, Automated Remediation Playbooks.
+- **CI/CD & Tools:** Git, GitHub, CI/CD Workflows.
 
-### Architecture & Computer Science Fundamentals
-- **Algorithms & Data Structures:** Graph theory, pathfinding (BFS/DFS, A*), time and space complexity analysis (Big-O).
-- **Concurrency:** Multithreaded programming (POSIX threads, mutexes, condition variables, deadlock prevention, FIFO/EDF scheduling).
+### Computer Science Fundamentals & Algorithms
+- **Concurrency & Multithreading:** POSIX Threads (`pthreads`), Mutexes, Deadlock Prevention, FIFO/EDF Scheduling, Race Condition mitigation.
+- **Algorithms & Math:** Graph Theory, Spatio-temporal Pathfinding Algorithms (BFS, Dijkstra, Chase/Scatter/Flee AI), Time & Space Complexity Analysis (Big-O notation).
+- **Methodologies:** Agile Engineering, First-Principles Design, Test-Driven Development logic.
 
 ---
 
 ## 3. Major Engineering Projects & Proof of Work
 
-### Cyber AI Hackathon (Partnership: CMA CGM, Mistral AI & Tangram)
-- **Autonomous AI Incident Agent:** Designed and developed an end-to-end autonomous agent for real-time SOC security incident triage, classification, and dynamic alert ingestion.
-- **Multimodal Ingestion & Remediation Pipelines:** Engineered multimodal data extraction (log parsing, screenshot OCR), threat categorization engine, automated remediation playbooks, and real-time dashboard.
+### Cyber AI Hackathon (Partnership with CMA CGM, Mistral AI & Tangram)
+- **Autonomous AI Incident Agent:** Designed and built an end-to-end autonomous agent for dynamic ingestion, classification, and real-time triage of Security Operations Center (SOC) incidents.
+- **Multimodal Ingestion & Remediation Pipelines:** Engineered multimodal extraction (log parsing, screenshot OCR), threat categorization engines, automated remediation playbooks, and interactive real-time dashboards.
 
 ### AI & Advanced Software Architectures (School 42)
-- **RAG Against The Machine & Agent Smith:** Built modular RAG architectures (semantic chunking, vector embeddings, re-ranking) and autonomous agent frameworks with self-healing validation loops.
-- **Call Me Maybe (Tool & Function Calling Engine):** Implemented deterministic Function Calling via Constrained Decoding, achieving 100% structured JSON/Pydantic schema adherence using local SLMs (Qwen 0.6B).
-- **Pac-Man (Object-Oriented Engine):** Engineered a full-featured game in Python using strict OOP principles, deterministic state management, and autonomous ghost AI pathfinding behaviors.
+- **RAG Against The Machine & Agent Smith:** Developed modular RAG architectures featuring semantic chunking, dense vector embeddings, re-ranking, and autonomous agent frameworks with Chain-of-Thought reasoning and self-healing validation loops.
+- **Call Me Maybe (Tool & Function Calling Engine):** Built a deterministic Function Calling engine using Constrained Decoding, achieving 100% structured JSON and Pydantic schema adherence on lightweight local SLMs (Qwen 0.6B).
+- **Pac-Man (Object-Oriented Engine):** Engineered a full-featured game in Python employing strict OOP principles, deterministic state management, dynamic configuration parsers, and autonomous ghost AI pathfinding (chase/scatter/flee modes).
 
-### Infrastructure, Networks & Low-Level Systems (School 42)
-- **Inception & Born2beRoot:** Deployed a microservices infrastructure using isolated Docker containers (Nginx TLS 1.3, WordPress, MariaDB, Docker Secrets) on a hardened Debian server with encrypted LVM partitions.
-- **The Answer Protocol:** Built a high-concurrency TCP multiplayer server in C implementing a custom RFC-compliant network protocol, strict ABNF grammar parsing, asynchronous socket polling, and robust state serialization.
-- **Fly-in & Codexion:** Designed capacity-constrained network routing algorithms using spatio-temporal BFS in Python; engineered multithreaded simulation kernels in C with deadlock-free scheduling.
+### Infrastructure, Network & Low-Level Engineering (School 42)
+- **Inception & Born2beRoot:** Deployed a containerized microservices infrastructure (Nginx TLS 1.3, WordPress, MariaDB, Docker Secrets) on a hardened Debian server featuring encrypted LVM partitions, UFW firewalls, and strict security policies.
+- **The Answer Protocol:** Developed a high-concurrency TCP multiplayer server in C implementing a custom RFC-compliant network protocol with strict ABNF grammar parsing, asynchronous socket polling, and robust state serialization.
+- **Fly-in & Codexion:** Designed capacity-constrained network routing algorithms using spatio-temporal BFS in Python; engineered multithreaded simulation kernels in C using POSIX threads, mutexes, and deadlock-free FIFO/EDF scheduling.
 
 ---
 
 ## 4. Prior Professional Background & Transferable Skills
 
-- **2020 - 2025 | JERA Design (Interior Architect & Entrepreneur):** Directed end-to-end technical scoping, feasibility studies, budget allocation, vendor management, and multi-stakeholder delivery with full accountability.
-- **2020 - 2021 | MMI Déco (Trainer):** Pedagogical delivery and structured methodology training for national RNCP state certifications.
-- **2013 - 2025 | Retail Design (Project Lead & Consultant - BoConcept, Mobalpa, IKEA):** High-value technical sales, complex client project management, and custom implementation.
-- **2008 - 2010 | Gendarmerie Nationale (Police Officer):** Procedural rigor, high-stress resilience, operational discipline, and selfless team spirit.
+### Professional Timeline
+- **2020 - 2025 | JERA Design:** Interior Architect & Entrepreneur. Directed end-to-end technical scoping, structural feasibility studies, budget allocation, and multi-stakeholder project delivery with absolute accountability.
+- **2020 - 2021 | MMI Déco:** Pedagogical Trainer. Delivered structured methodologies and training for national RNCP state certifications.
+- **2013 - 2025 | Retail Design:** Design Consultant & Project Lead (BoConcept, Mobalpa, IKEA). Managed complex client requirements, high-value technical sales, and custom spatial implementations.
+- **2008 - 2010 | Gendarmerie Nationale:** Police Officer. Cultivated procedural discipline, high-stress resilience, operational rigor, strict protocol compliance, and team cohesion.
+
+### Key Transferable Skills
+- **Project Leadership & Accountability:** 10+ years managing budgets, technical delivery, dynamic constraints, and business-critical operations.
+- **Operational Rigor under Pressure:** Formative experience in law enforcement and entrepreneurship providing resilience and protocol adherence during security incidents or system outages.
+- **Technical Communication:** Demonstrated capacity to bridge technical scoping with business execution for stakeholders.
 
 ---
 
-## 5. Job Search Targeting Preferences & Constraints (LLM Evaluation Rules)
+## 5. Job Search Targeting Preferences & Constraints
 
-These rules dictate how the LLM analyzer must score job offers and decide on matches (`is_match` and `score`).
+### Target Roles
+- Ingénieur IA / AI Engineer
+- Développeur Backend / Python Developer
+- Software Engineer / Ingénieur Logiciel
+- DevOps / DevSecOps Engineer
+- Analyste SOC / CSIRT / Auditeur Sécurité / Pentesteur Junior
+- Cybersécurité & Ingénieur Systèmes / Réseaux
 
-### Allowed Contract Types
-The candidate is actively seeking and will only accept the following contract types:
-1. **Alternance** (Apprenticeship / Professionalization contract / Work-study)
-2. **CDI** (Permanent full-time contract)
-3. **CDD** (Fixed-term contract, duration between 4 and 6 months)
-4. **Intérim** (Temporary assignment, duration between 4 and 6 months)
+### Target Geographic Locations
+- Department 13 (Bouches-du-Rhône)
+- Key Hubs: Marseille, Aix-en-Provence, Vitrolles, Marignane, Aubagne, La Ciotat, Allauch
+- Work Arrangements: On-site, Hybrid, Remote / Télétravail
 
-### Geographic Scope & Remote Policy
-- **Primary Location:** Bouches-du-Rhône (13), France (Marseille, Aix-en-Provence, Allauch, Aubagne, Vitrolles, Marignane, etc.).
-- **On-site / Hybrid / Remote:**
-  - On-site in Bouches-du-Rhône (13) is fully accepted (Marseille, Aix, Aubagne, Vitrolles, Marignane, La Ciotat).
-  - Geographic exclusion: Istres and West of Étang de Berre are too far (exclude Dassault Aviation / Istres on-site).
-  - Hybrid or Full-remote is welcomed but not mandatory.
-  - Jobs located exclusively on-site outside of Bouches-du-Rhône (e.g. Paris, Lyon, Toulouse on-site) without full-remote must be marked as not matching.
+### Contract Types Accepted
+- Alternance (Work-study / Apprenticeship)
+- CDI (Permanent Contract)
+- CDD (Fixed-term Contract)
+- Intérim
 
-### Target Roles & Job Titles (French & English)
-The candidate targets roles that align with software development, backend, systems, AI engineering, DevOps, and cyber operations:
-- **Software Developer / Engineer:** Développeur Logiciel, Ingénieur Logiciel, Software Engineer, Software Developer.
-- **Backend Engineer:** Développeur Backend, Ingénieur Backend, Backend Developer, Python Engineer, C/Systems Engineer.
-- **Fullstack Engineer:** Développeur Fullstack (provided there is a strong backend/API/system focus, not exclusively frontend).
-- **AI & Data Engineer:** Ingénieur IA, AI Engineer, Machine Learning Engineer, LLM Engineer, Generative AI Developer.
-- **DevOps / SRE:** Ingénieur DevOps, DevOps Engineer, Site Reliability Engineer, Cloud/Infrastructure Engineer.
-- **DevSecOps:** Ingénieur DevSecOps, DevSecOps Engineer, Security DevOps, Cloud Security Engineer.
-- **Cybersecurity & SOC:** Analyste SOC, SOC Analyst, Security Operations Center Analyst, Cyber Security Analyst.
-- **CSIRT & Incident Response (DFIR Junior):** Analyste CSIRT, Incident Response Analyst, Digital Forensics & Incident Response (DFIR) Junior, Analyste Réponse à Incident.
-- **Security Audit & Pentesting (Junior):** Auditeur Sécurité, Pentesteur Junior, Junior Penetration Tester, Security Consultant, Auditeur Technique Cybersécurité.
-- **Cyber Engineering:** Ingénieur Cybersécurité, Cyber Security Engineer, Cyber Systems Engineer, Ingénieur Sécurité Opérationnelle.
+### Preferred Target Companies
+- Airbus / Airbus Helicopters (Marignane)
+- Thales
+- CMA CGM
+- Orange Cyberdefense
+- Groupe FDJ
+- Groupe BPCE
+- Vinci
 
-### Strict Dealbreakers (Immediate Rejection: `is_match = False`, `score < 40`)
-A job offer must be rejected if ANY of the following conditions are met:
-1. **Predominantly Web Frontend:** The job is mainly focused on UI/UX web development (HTML/CSS, WordPress/CMS theme builders, pure React/Vue/Angular frontend without backend/system engineering).
-2. **Excessive Experience Barrier:** The job explicitly requires a "Senior" title or more than 3 years of mandatory professional software engineering experience (junior/mid-level, alternance, or entry-level positions are target).
-3. **Severe Skill Gap (>50% missing):** More than 50% of the core required technologies are missing from the candidate's profile (e.g. mandatory Java Spring Boot + SAP + C# where the candidate does not have prior overlap).
-
-### Tailored Pitch Guidelines (For Cover Letter / Pitch Generation)
-When drafting pitches for matched jobs:
-- Emphasize the rare synergy between **10 years of professional maturity / project management** and **rigorous software engineering foundations from School 42** (C memory management, concurrency, algorithmic precision).
-- Highlight concrete achievements: the **Cyber AI Hackathon** with CMA CGM and Mistral AI, production of autonomous agents, and deterministic tool-calling architectures.
-- Keep the tone professional, pragmatic, assertive, and focused on immediate value delivery.
-
+### Matching Threshold Directive
+- **Max Allowed Missing Skills Percent:** 50% (Profile exhibits strong low-level foundation, high adaptability, and rapid learning capacity demonstrated via School 42 curriculum).

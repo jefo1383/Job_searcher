@@ -1,5 +1,6 @@
 """Application document and pitch generator module using Google GenAI SDK."""
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from google import genai
@@ -183,29 +184,48 @@ class JobGenerator:
             system_instruction=self._build_system_instruction(),
         )
 
-        try:
-            # Appel asynchrone non-bloquant
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=user_prompt,
-                config=config,
-            )
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                # Appel asynchrone non-bloquant
+                response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=user_prompt,
+                    config=config,
+                )
 
-            if hasattr(response, "parsed") and response.parsed is not None:
-                parsed_result: Any = response.parsed
-                if isinstance(parsed_result, TailoredApplication):
-                    return parsed_result
-                if isinstance(parsed_result, dict):
-                    return TailoredApplication.model_validate(parsed_result)
+                if hasattr(response, "parsed") and response.parsed is not None:
+                    parsed_result: Any = response.parsed
+                    if isinstance(parsed_result, TailoredApplication):
+                        return parsed_result
+                    if isinstance(parsed_result, dict):
+                        return TailoredApplication.model_validate(parsed_result)
 
-            if response.text:
-                return TailoredApplication.model_validate_json(response.text)
+                if response.text:
+                    return TailoredApplication.model_validate_json(
+                        response.text
+                    )
 
-            raise RuntimeError("Gemini returned an empty response body.")
+                raise RuntimeError("Gemini returned an empty response body.")
 
-        except Exception as err:
-            if isinstance(err, (ValueError, RuntimeError)):
-                raise
-            raise RuntimeError(
-                f"Failed to generate tailored application documents: {err}"
-            ) from err
+            except Exception as err:
+                last_err = err
+                err_str = str(err)
+                if (
+                    "503" in err_str
+                    or "429" in err_str
+                    or "UNAVAILABLE" in err_str
+                ) and attempt < 2:
+                    wait_sec = 2.0 * (attempt + 1)
+                    await asyncio.sleep(wait_sec)
+                    continue
+
+                if isinstance(err, (ValueError, RuntimeError)):
+                    raise
+                raise RuntimeError(
+                    f"Failed to generate tailored application documents: {err}"
+                ) from err
+
+        raise RuntimeError(
+            f"Failed to generate tailored documents after retries: {last_err}"
+        )

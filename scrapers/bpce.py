@@ -90,17 +90,21 @@ class BpceScraper(BaseScraper):
         Yields:
             RawJobListing: Normalized scraped job post.
         """
+        yielded_count = 0
         async with httpx.AsyncClient(
             headers=DEFAULT_BPCE_HEADERS,
             timeout=self.timeout_seconds,
             follow_redirects=True,
         ) as client:
             for keyword in keywords:
+                if yielded_count >= limit:
+                    break
+
                 # 1. Tentative via l'endpoint de recherche API
                 params: dict[str, str | int] = {
                     "keyword": keyword,
                     "location": "13",
-                    "limit": min(limit, 20),
+                    "limit": min(limit - yielded_count, 20),
                 }
 
                 try:
@@ -114,6 +118,9 @@ class BpceScraper(BaseScraper):
                         jobs_list = self._extract_jobs(data)
 
                         for item in jobs_list:
+                            if yielded_count >= limit:
+                                break
+
                             title = item.get("title", "").strip()
                             loc = item.get("location", "")
                             job_url = item.get("url", "")
@@ -141,6 +148,7 @@ class BpceScraper(BaseScraper):
                                 location=loc,
                                 raw_payload=item,
                             )
+                            yielded_count += 1
 
                     else:
                         # 2. Fallback via recherche HTML SSR
@@ -159,6 +167,9 @@ class BpceScraper(BaseScraper):
                             re.DOTALL | re.IGNORECASE,
                         )
                         for match in card_pattern.finditer(page_res.text):
+                            if yielded_count >= limit:
+                                break
+
                             relative_url, raw_title = match.groups()
                             clean_t = _clean_text(raw_title)
                             if not clean_t:
@@ -174,6 +185,7 @@ class BpceScraper(BaseScraper):
                                 location="Marseille (13)",
                                 raw_payload={"scraped_url": full_url},
                             )
+                            yielded_count += 1
 
                 except Exception as err:
                     print(

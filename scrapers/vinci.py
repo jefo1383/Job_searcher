@@ -89,12 +89,16 @@ class VinciScraper(BaseScraper):
         Yields:
             RawJobListing: Normalized scraped job post.
         """
+        found_count = 0
         async with httpx.AsyncClient(
             headers=DEFAULT_VINCI_HEADERS,
             timeout=self.timeout_seconds,
             follow_redirects=True,
         ) as client:
             for keyword in keywords:
+                if found_count >= limit:
+                    break
+
                 # Requête de recherche sur le portail VINCI
                 query_url = (
                     f"{VINCI_SEARCH_URL}/{quote_plus(keyword)}/13"
@@ -111,7 +115,6 @@ class VinciScraper(BaseScraper):
                         re.DOTALL | re.IGNORECASE,
                     )
 
-                    found_count = 0
                     for match in card_pattern.finditer(response.text):
                         if found_count >= limit:
                             break
