@@ -188,6 +188,21 @@ class JobHunterOrchestrator:
                     )
                 )
 
+                # Rectification du nom d'entreprise si détecté par Gemini
+                is_generic_company = any(
+                    token in job.company.lower()
+                    for token in [
+                        "hellowork",
+                        "listing",
+                        "entreprise",
+                        "unknown",
+                        "inconnue",
+                        "confidentiel",
+                    ]
+                )
+                if eval_res.company and (is_generic_company or not job.company):
+                    job.company = eval_res.company.strip()
+
                 if is_qualified:
                     # Génération du pitch ciblé et de la lettre pour Telegram/ATS
                     app_doc = await self.generator.generate_application(
@@ -199,11 +214,12 @@ class JobHunterOrchestrator:
                         platform=job.platform,
                     )
 
-                    # Mise à jour du statut en base de données
+                    # Mise à jour du statut et de l'entreprise en base de données
                     await self.db.update_job_evaluation(
                         job_id=job.id,
                         score=eval_res.score,
                         status=JobStatus.PENDING_REVIEW,
+                        company=job.company,
                     )
 
                     # Envoi de la notification interactive sur Telegram
@@ -224,6 +240,7 @@ class JobHunterOrchestrator:
                         job_id=job.id,
                         score=eval_res.score,
                         status=JobStatus.REJECTED,
+                        company=job.company if eval_res.company else None,
                     )
                     print(
                         f"  ❌ Rejetée ({eval_res.score}/100) : "

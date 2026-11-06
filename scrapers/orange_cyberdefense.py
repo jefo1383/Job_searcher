@@ -1,10 +1,10 @@
 """Scraper implementation for Orange Cyberdefense career opportunities."""
 
 import html
+import json
 import re
 from collections.abc import AsyncIterator
-from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import urljoin
 
 import httpx
 
@@ -13,16 +13,17 @@ from scrapers.models import RawJobListing
 
 # En-têtes HTTP simulant une requête de navigation standard
 DEFAULT_ORANGE_HEADERS: dict[str, str] = {
-    "Accept": "application/json, text/plain, */*",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
 }
 
-# Racine du portail d'offres du groupe Orange
-ORANGE_JOBS_API_URL: str = "https://orange.jobs/jobs/v3/offers"
-ORANGE_PUBLIC_BASE_URL: str = "https://orange.jobs/jobs/offer"
+# Points d'accès du portail Orange Jobs (Phenom People)
+ORANGE_SEARCH_URL: str = "https://orange.jobs/fr/fr/search-results"
+ORANGE_JOB_BASE_URL: str = "https://orange.jobs/fr/fr/job"
 
 
 def _clean_html(raw_html: str | None) -> str:
@@ -84,7 +85,7 @@ class OrangeCyberScraper(BaseScraper):
         locations: list[str],
         limit: int = 20,
     ) -> AsyncIterator[RawJobListing]:
-        """Query Orange jobs API for matching positions.
+        """Query Orange jobs Phenom People portal for matching positions.
 
         Args:
             keywords: Target role or technology keywords.
@@ -104,69 +105,77 @@ class OrangeCyberScraper(BaseScraper):
                 if yielded_count >= limit:
                     break
 
-                # Paramètres de recherche ciblant la France et l'entité cyber
-                params: dict[str, str | int] = {
-                    "keyword": keyword,
-                    "lang": "FR",
-                    "country": "France",
-                    "limit": min(limit - yielded_count, 20),
-                }
-
                 try:
                     response = await client.get(
-                        ORANGE_JOBS_API_URL,
-                        params=params,
+                        ORANGE_SEARCH_URL,
+                        params={"keywords": keyword},
                     )
                     if response.status_code != 200:
                         continue
 
-                    data = response.json()
-                    offers = self._extract_offers_list(data)
+                    # Décodage de l'objet JavaScript Phenom People DDO
+                    idx = response.text.find("phApp.ddo = ")
+                    if idx == -1:
+                        continue
 
-                    for item in offers:
+                    start = idx + len("phApp.ddo = ")
+                    decoder = json.JSONDecoder()
+                    data, _ = decoder.raw_decode(response.text[start:])
+
+                    eager = data.get("eagerLoadRefineSearch", {})
+                    jobs = eager.get("data", {}).get("jobs", [])
+
+                    for item in jobs:
                         if yielded_count >= limit:
                             break
 
                         title = item.get("title", "").strip()
-                        raw_loc = self._extract_location(item)
-                        offer_id = str(item.get("id", "")).strip()
+                        raw_loc = item.get("city", "").strip()
+                        job_id = str(item.get("jobId", "")).strip()
 
-                        if not title or not offer_id:
+                        if not title or not job_id:
                             continue
 
-                        # Vérification de l'entité (doit être cyber ou
-                        # mentionnée dans le titre/mot-clé)
-                        item_entity = item.get("entity", "")
-                        if (
-                            self.entity
-                            and self.entity.lower()
-                            not in item_entity.lower()
-                            and "cyber" not in title.lower()
-                            and "cyber" not in keyword.lower()
-                        ):
+                        # Vérification de la composante Cyber / SOC
+                        category = item.get("category", "")
+                        org = item.get("organization", "")
+                        is_cyber = (
+                            "cyber" in title.lower()
+                            or "soc" in title.lower()
+                            or "secops" in title.lower()
+                            or "sécurité" in title.lower()
+                            or "cyber" in keyword.lower()
+                            or "cyber" in category.lower()
+                            or "cyber" in org.lower()
+                        )
+                        if not is_cyber:
                             continue
 
                         # Vérification de la zone géographique
                         if not self._is_location_allowed(raw_loc):
                             continue
 
-                        public_url = (
-                            f"{ORANGE_PUBLIC_BASE_URL}/{quote_plus(offer_id)}"
-                        )
-                        description = _clean_html(
-                            item.get("description")
-                            or item.get("profil")
-                            or title
-                        )
+                        apply_url = item.get("applyUrl")
+                        job_url_rel = item.get("jobUrl")
+                        if job_url_rel:
+                            public_url = urljoin("https://orange.jobs", job_url_rel)
+                        else:
+                            public_url = f"{ORANGE_JOB_BASE_URL}/{job_id}"
+
+                        desc = item.get("descriptionTeaser") or title
 
                         yield RawJobListing(
                             platform=self.name,
                             company=self.company_name,
                             title=title,
                             url=public_url,
-                            description=description,
+                            description=desc,
                             location=raw_loc,
-                            raw_payload=item,
+                            raw_payload={
+                                "job_id": job_id,
+                                "apply_url": apply_url or public_url,
+                                "raw_item": item,
+                            },
                         )
                         yielded_count += 1
 
@@ -190,41 +199,3 @@ class OrangeCyberScraper(BaseScraper):
             return True
         loc_lower = location_str.lower()
         return any(target in loc_lower for target in self.allowed_locations)
-
-    @staticmethod
-    def _extract_offers_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
-        """Normalize JSON payload into a list of offer dictionaries.
-
-        Args:
-            payload: Deserialized JSON response from Orange jobs API.
-
-        Returns:
-            list[dict[str, Any]]: List of offer mappings.
-        """
-        if "offers" in payload and isinstance(payload["offers"], list):
-            return payload["offers"]
-        if "items" in payload and isinstance(payload["items"], list):
-            return payload["items"]
-        if "data" in payload and isinstance(payload["data"], list):
-            return payload["data"]
-        return []
-
-    @staticmethod
-    def _extract_location(item: dict[str, Any]) -> str:
-        """Extract a readable location string from offer data.
-
-        Args:
-            item: Single offer dictionary.
-
-        Returns:
-            str: Normalized location representation.
-        """
-        loc = item.get("location")
-        if isinstance(loc, str):
-            return loc
-        if isinstance(loc, dict):
-            city = loc.get("city", "")
-            dpt = loc.get("department", "")
-            return f"{city} ({dpt})".strip() if dpt else city
-        city_direct = item.get("city", "")
-        return str(city_direct) if city_direct else ""

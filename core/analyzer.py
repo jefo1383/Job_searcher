@@ -43,6 +43,11 @@ class JobAnalysisResult(BaseModel):
         ...,
         description="Brief summary explaining the rationale behind the score.",
     )
+    company: str | None = Field(
+        default=None,
+        description="Actual hiring company name extracted from job text "
+        "if provided name is generic, missing, or portal-based.",
+    )
 
 
 class JobAnalyzer:
@@ -119,7 +124,11 @@ class JobAnalyzer:
             "   - 65-79: Good match with minor skill gaps easily bridgeable.\n"
             "   - 40-64: Partial match or secondary interest.\n"
             "   - 0-39: Definite mismatch or hit by dealbreakers.\n"
-            "3. Return strict structured JSON adhering to the provided schema."
+            "3. If the input company is generic, portal-based, or placeholder "
+            "(e.g., 'HelloWork Listing', 'Entreprise', 'Unknown'), identify "
+            "the real employer from the title or description and return it in "
+            "the 'company' field.\n"
+            "4. Return strict structured JSON adhering to the provided schema."
         )
 
     async def analyze_job(
@@ -166,47 +175,48 @@ class JobAnalyzer:
             system_instruction=self._build_system_instruction(),
         )
 
+        models_to_try = [self.model_name]
+        for fallback in ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]:
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+
         last_err: Exception | None = None
-        for attempt in range(3):
-            try:
-                # Appel asynchrone non-bloquant à l'API Gemini Flash
-                response = await self.client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=user_prompt,
-                    config=config,
-                )
+        for current_model in models_to_try:
+            for attempt in range(2):
+                try:
+                    # Appel asynchrone non-bloquant à l'API Gemini Flash
+                    response = await self.client.aio.models.generate_content(
+                        model=current_model,
+                        contents=user_prompt,
+                        config=config,
+                    )
 
-                # Traitement de l'objet parsé ou validation du texte brut JSON
-                if hasattr(response, "parsed") and response.parsed is not None:
-                    parsed_result: Any = response.parsed
-                    if isinstance(parsed_result, JobAnalysisResult):
-                        return parsed_result
-                    if isinstance(parsed_result, dict):
-                        return JobAnalysisResult.model_validate(parsed_result)
+                    # Traitement de l'objet parsé ou validation du texte brut JSON
+                    if hasattr(response, "parsed") and response.parsed is not None:
+                        parsed_result: Any = response.parsed
+                        if isinstance(parsed_result, JobAnalysisResult):
+                            return parsed_result
+                        if isinstance(parsed_result, dict):
+                            return JobAnalysisResult.model_validate(parsed_result)
 
-                if response.text:
-                    return JobAnalysisResult.model_validate_json(response.text)
+                    if response.text:
+                        return JobAnalysisResult.model_validate_json(response.text)
 
-                raise RuntimeError("Gemini returned an empty response body.")
+                    raise RuntimeError("Gemini returned an empty response body.")
 
-            except Exception as err:
-                last_err = err
-                err_str = str(err)
-                if (
-                    "503" in err_str
-                    or "429" in err_str
-                    or "UNAVAILABLE" in err_str
-                ) and attempt < 2:
-                    wait_sec = 2.0 * (attempt + 1)
-                    await asyncio.sleep(wait_sec)
-                    continue
+                except Exception as err:
+                    last_err = err
+                    err_str = str(err)
+                    if (
+                        "503" in err_str
+                        or "429" in err_str
+                        or "UNAVAILABLE" in err_str
+                    ) and attempt < 1:
+                        await asyncio.sleep(1.5)
+                        continue
 
-                if isinstance(err, (ValueError, RuntimeError)):
-                    raise
-                # Encapsulation des erreurs réseau ou de quota Google GenAI
-                raise RuntimeError(
-                    f"Failed to evaluate job posting with Gemini: {err}"
-                ) from err
+                    # Passe au modèle alternatif en cas d'erreur de charge
+                    break
 
         raise RuntimeError(
             f"Failed to evaluate job posting after retries: {last_err}"

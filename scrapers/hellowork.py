@@ -13,9 +13,9 @@ from scrapers.models import RawJobListing
 
 # URL racine de recherche d'offres HelloWork
 HELLOWORK_SEARCH_URL: str = (
-    "https://www.hellowork.com/fr-fr/emploi/recherche.html"
+    "https://hellowork.com/fr-fr/emploi/recherche.html"
 )
-BASE_DOMAIN: str = "https://www.hellowork.com"
+BASE_DOMAIN: str = "https://hellowork.com"
 
 
 def _clean_html_text(raw_text: str | None) -> str:
@@ -187,10 +187,20 @@ class HelloWorkScraper(BaseScraper):
             if len(title_clean) < 3 or "voir l'offre" in title_clean.lower():
                 continue
 
+            # Détection d'un nom d'entreprise en suffixe (ex: 'Ingénieur IA H/F Klanik')
+            company_name = "Entreprise"
+            comp_match = re.search(
+                r"(?:H/F|F/H|\bchez\b|[-–—])\s+([A-Za-z0-9_\s&]{2,35})$",
+                title_clean,
+                re.IGNORECASE,
+            )
+            if comp_match:
+                company_name = comp_match.group(1).strip()
+
             listings.append(
                 RawJobListing(
                     platform=self.name,
-                    company="HelloWork Listing",
+                    company=company_name,
                     title=title_clean,
                     url=full_url,
                     description=f"{title_clean} - Offre consultable sur HelloWork",

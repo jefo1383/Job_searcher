@@ -544,27 +544,39 @@ class JobDatabase:
         job_id: int,
         score: int,
         status: JobStatus,
+        company: str | None = None,
     ) -> bool:
-        """Update job score and status after LLM evaluation.
+        """Update job score, status, and optional rectified company name.
 
         Args:
             job_id: SQLite primary key.
             score: Computed match score (0-100).
             status: New status (e.g., PENDING_REVIEW or REJECTED).
+            company: Optional rectified employer name.
 
         Returns:
             bool: True if a row was updated, False otherwise.
         """
         now_iso = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                """
-                UPDATE jobs
-                SET score = ?, status = ?, updated_at = ?
-                WHERE id = ?;
-                """,
-                (score, status.value, now_iso, job_id),
-            )
+            if company:
+                cursor = await db.execute(
+                    """
+                    UPDATE jobs
+                    SET score = ?, status = ?, company = ?, updated_at = ?
+                    WHERE id = ?;
+                    """,
+                    (score, status.value, company, now_iso, job_id),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    UPDATE jobs
+                    SET score = ?, status = ?, updated_at = ?
+                    WHERE id = ?;
+                    """,
+                    (score, status.value, now_iso, job_id),
+                )
             await db.commit()
             return cursor.rowcount > 0
 

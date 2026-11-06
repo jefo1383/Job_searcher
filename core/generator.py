@@ -184,47 +184,51 @@ class JobGenerator:
             system_instruction=self._build_system_instruction(),
         )
 
+        models_to_try = [self.model_name]
+        for fallback in ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]:
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+
         last_err: Exception | None = None
-        for attempt in range(3):
-            try:
-                # Appel asynchrone non-bloquant
-                response = await self.client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=user_prompt,
-                    config=config,
-                )
-
-                if hasattr(response, "parsed") and response.parsed is not None:
-                    parsed_result: Any = response.parsed
-                    if isinstance(parsed_result, TailoredApplication):
-                        return parsed_result
-                    if isinstance(parsed_result, dict):
-                        return TailoredApplication.model_validate(parsed_result)
-
-                if response.text:
-                    return TailoredApplication.model_validate_json(
-                        response.text
+        for current_model in models_to_try:
+            for attempt in range(2):
+                try:
+                    # Appel asynchrone non-bloquant
+                    response = await self.client.aio.models.generate_content(
+                        model=current_model,
+                        contents=user_prompt,
+                        config=config,
                     )
 
-                raise RuntimeError("Gemini returned an empty response body.")
+                    if hasattr(response, "parsed") and response.parsed is not None:
+                        parsed_result: Any = response.parsed
+                        if isinstance(parsed_result, TailoredApplication):
+                            return parsed_result
+                        if isinstance(parsed_result, dict):
+                            return TailoredApplication.model_validate(
+                                parsed_result
+                            )
 
-            except Exception as err:
-                last_err = err
-                err_str = str(err)
-                if (
-                    "503" in err_str
-                    or "429" in err_str
-                    or "UNAVAILABLE" in err_str
-                ) and attempt < 2:
-                    wait_sec = 2.0 * (attempt + 1)
-                    await asyncio.sleep(wait_sec)
-                    continue
+                    if response.text:
+                        return TailoredApplication.model_validate_json(
+                            response.text
+                        )
 
-                if isinstance(err, (ValueError, RuntimeError)):
-                    raise
-                raise RuntimeError(
-                    f"Failed to generate tailored application documents: {err}"
-                ) from err
+                    raise RuntimeError("Gemini returned an empty response body.")
+
+                except Exception as err:
+                    last_err = err
+                    err_str = str(err)
+                    if (
+                        "503" in err_str
+                        or "429" in err_str
+                        or "UNAVAILABLE" in err_str
+                    ) and attempt < 1:
+                        await asyncio.sleep(1.5)
+                        continue
+
+                    # Passe au modèle de secours
+                    break
 
         raise RuntimeError(
             f"Failed to generate tailored documents after retries: {last_err}"

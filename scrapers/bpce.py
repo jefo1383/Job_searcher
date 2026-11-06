@@ -4,7 +4,7 @@ import html
 import re
 from collections.abc import AsyncIterator
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import urljoin
 
 import httpx
 
@@ -13,7 +13,8 @@ from scrapers.models import RawJobListing
 
 # En-têtes HTTP simulant un navigateur standard
 DEFAULT_BPCE_HEADERS: dict[str, str] = {
-    "Accept": "application/json, text/html, */*",
+    "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/json",
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -22,7 +23,9 @@ DEFAULT_BPCE_HEADERS: dict[str, str] = {
 
 # Points d'accès de recherche du groupe BPCE
 BPCE_BASE_URL: str = "https://recrutement.bpce.fr"
-BPCE_API_SEARCH_URL: str = "https://recrutement.bpce.fr/api/jobs/search"
+BPCE_API_SEARCH_URL: str = (
+    "https://recrutement.bpce.fr/app/wp-json/bpce/v1/search/jobs"
+)
 
 
 def _clean_text(raw_text: str | None) -> str:
@@ -80,7 +83,7 @@ class BpceScraper(BaseScraper):
         locations: list[str],
         limit: int = 20,
     ) -> AsyncIterator[RawJobListing]:
-        """Query BPCE recruitment portal for matching jobs.
+        """Query BPCE recruitment portal via official WordPress search API.
 
         Args:
             keywords: Target role or technology keywords.
@@ -100,92 +103,89 @@ class BpceScraper(BaseScraper):
                 if yielded_count >= limit:
                     break
 
-                # 1. Tentative via l'endpoint de recherche API
-                params: dict[str, str | int] = {
+                payload: dict[str, Any] = {
+                    "lang": "fr",
                     "keyword": keyword,
-                    "location": "13",
-                    "limit": min(limit - yielded_count, 20),
+                    "size": str(min(limit - yielded_count, 20)),
+                    "from": "0",
                 }
 
                 try:
-                    response = await client.get(
+                    response = await client.post(
                         BPCE_API_SEARCH_URL,
-                        params=params,
+                        json=payload,
                     )
+                    if response.status_code != 200:
+                        continue
 
-                    if response.status_code == 200:
-                        data = response.json()
-                        jobs_list = self._extract_jobs(data)
+                    data = response.json()
+                    items = data.get("data", {}).get("items", [])
 
-                        for item in jobs_list:
-                            if yielded_count >= limit:
-                                break
+                    for item in items:
+                        if yielded_count >= limit:
+                            break
 
-                            title = item.get("title", "").strip()
-                            loc = item.get("location", "")
-                            job_url = item.get("url", "")
-                            desc = _clean_text(
-                                item.get("description")
-                                or item.get("summary")
-                                or title
-                            )
-
-                            if not title or not job_url:
-                                continue
-
-                            if not self._is_location_allowed(loc):
-                                continue
-
-                            if not job_url.startswith("http"):
-                                job_url = f"{BPCE_BASE_URL}{job_url}"
-
-                            yield RawJobListing(
-                                platform=self.name,
-                                company=self.company_name,
-                                title=title,
-                                url=job_url,
-                                description=desc,
-                                location=loc,
-                                raw_payload=item,
-                            )
-                            yielded_count += 1
-
-                    else:
-                        # 2. Fallback via recherche HTML SSR
-                        search_page_url = (
-                            f"{BPCE_BASE_URL}/recherche-offres/"
-                            f"{quote_plus(keyword)}/13"
-                        )
-                        page_res = await client.get(search_page_url)
-                        if page_res.status_code != 200:
+                        title = _clean_text(item.get("title", ""))
+                        if not title:
                             continue
 
-                        # Extraction par carte HTML d'offres
-                        card_pattern = re.compile(
-                            r'<a[^>]+href=["\'](/offre-de-emploi/[^"\']+)["\']'
-                            r"[^>]*>(.*?)</a>",
-                            re.DOTALL | re.IGNORECASE,
+                        # Extraction de la marque (ex: CEPAC, BPCE IT, Natixis)
+                        brands = item.get("brand", [])
+                        brand_name = (
+                            brands[0]
+                            if (isinstance(brands, list) and brands)
+                            else self.company_name
                         )
-                        for match in card_pattern.finditer(page_res.text):
-                            if yielded_count >= limit:
-                                break
 
-                            relative_url, raw_title = match.groups()
-                            clean_t = _clean_text(raw_title)
-                            if not clean_t:
-                                continue
+                        # Extraction de la localisation
+                        raw_loc = item.get("localisation", "")
+                        if not raw_loc:
+                            loc_list = item.get("localisations", [])
+                            if isinstance(loc_list, list) and loc_list:
+                                first_loc = loc_list[0]
+                                raw_loc = (
+                                    first_loc.get("city")
+                                    or first_loc.get("localisation")
+                                    or first_loc.get("department")
+                                    or ""
+                                )
 
-                            full_url = f"{BPCE_BASE_URL}{relative_url}"
-                            yield RawJobListing(
-                                platform=self.name,
-                                company=self.company_name,
-                                title=clean_t,
-                                url=full_url,
-                                description=f"Offre BPCE : {clean_t}",
-                                location="Marseille (13)",
-                                raw_payload={"scraped_url": full_url},
-                            )
-                            yielded_count += 1
+                        # Filtrage géographique
+                        if not self._is_location_allowed(raw_loc):
+                            continue
+
+                        # Extraction des URLs de consultation et de candidature directes
+                        link_dict = item.get("link", {})
+                        rel_url = (
+                            link_dict.get("url", "")
+                            if isinstance(link_dict, dict)
+                            else str(link_dict)
+                        )
+                        public_url = urljoin(BPCE_BASE_URL, rel_url)
+
+                        postulate_dict = item.get("postulate_link", {})
+                        apply_url = (
+                            postulate_dict.get("url")
+                            if isinstance(postulate_dict, dict)
+                            else None
+                        )
+
+                        desc = _clean_text(item.get("description", "")) or title
+
+                        yield RawJobListing(
+                            platform=self.name,
+                            company=brand_name,
+                            title=title,
+                            url=public_url,
+                            description=desc,
+                            location=raw_loc,
+                            raw_payload={
+                                "brand": brand_name,
+                                "apply_url": apply_url or public_url,
+                                "raw_item": item,
+                            },
+                        )
+                        yielded_count += 1
 
                 except Exception as err:
                     print(
@@ -207,21 +207,3 @@ class BpceScraper(BaseScraper):
             return True
         loc_lower = location_str.lower()
         return any(target in loc_lower for target in self.allowed_locations)
-
-    @staticmethod
-    def _extract_jobs(payload: dict[str, Any]) -> list[dict[str, Any]]:
-        """Normalize JSON payload into a list of job mappings.
-
-        Args:
-            payload: JSON response from BPCE recruitment endpoint.
-
-        Returns:
-            list[dict[str, Any]]: List of job entries.
-        """
-        if "jobs" in payload and isinstance(payload["jobs"], list):
-            return payload["jobs"]
-        if "data" in payload and isinstance(payload["data"], list):
-            return payload["data"]
-        if "results" in payload and isinstance(payload["results"], list):
-            return payload["results"]
-        return []
