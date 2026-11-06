@@ -1,0 +1,29 @@
+GEMINI.md
+Job_searcher.md
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# SQLite Database & Data
+data/
+*.db
+*.sqlite3
+
+# Playwright & Chrome profiles
+.playwright/
+chrome_user_data/

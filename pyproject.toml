@@ -1,0 +1,38 @@
+[project]
+name = "job-searcher"
+version = "0.1.0"
+description = "Autonomous job watcher and application assistant"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "google-genai>=2.34.0",
+    "playwright>=1.64.1",
+    "pydantic>=2.14.2",
+    "pydantic-settings>=2.16.2",
+    "python-telegram-bot>=21.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "flake8>=7.5.0",
+    "mypy>=2.4.1",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
