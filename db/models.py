@@ -62,6 +62,14 @@ class JobRecord(BaseModel):
         le=100,
         description="Match score calculated by Gemini Flash.",
     )
+    content_hash: str | None = Field(
+        default=None,
+        description="SHA-256 fingerprint including normalized location.",
+    )
+    loose_hash: str | None = Field(
+        default=None,
+        description="SHA-256 fingerprint of company and title only.",
+    )
     status: JobStatus = Field(
         default=JobStatus.NEW,
         description="Current processing lifecycle status.",

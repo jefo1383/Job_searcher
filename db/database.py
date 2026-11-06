@@ -1,13 +1,47 @@
 """Asynchronous SQLite database persistence and deduplication layer."""
 
+import hashlib
 import json
-from datetime import datetime, timezone
+import re
+import unicodedata
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import aiosqlite
 
 from db.models import JobRecord, JobStatus
+
+# Délais de tolérance pour la déduplication multi-sources
+DEFAULT_STRICT_WINDOW_DAYS: int = 30
+DEFAULT_LOOSE_WINDOW_DAYS: int = 14
+
+# Suffixes de formes juridiques à retirer pour normaliser l'entreprise
+LEGAL_SUFFIXES_REGEX: re.Pattern[str] = re.compile(
+    r"\b(sa|sas|sarl|inc|ltd|group|groupe|france|solutions|technologies|corp)\b",
+    re.IGNORECASE,
+)
+
+# Mentions de contrat et de parité à retirer du titre de poste
+JOB_TAGS_REGEX: re.Pattern[str] = re.compile(
+    r"(\([fh]\s*/\s*[fh]\)|\b[fh]\s*/\s*[fh]\b|"
+    r"\[\s*(cdi|cdd|alternance|stage|interim|freelance)\s*\]|"
+    r"\(\s*(cdi|cdd|alternance|stage|interim|freelance)\s*\)|"
+    r"\b(cdi|cdd|alternance|stage|interim)\b)",
+    re.IGNORECASE,
+)
+
+# Alias de localisation cibles vers leur forme canonique
+CITY_ALIAS_MAP: dict[str, str] = {
+    "marseille": "marseille",
+    "aix": "aix",
+    "allauch": "allauch",
+    "aubagne": "aubagne",
+    "marignane": "marignane",
+    "istres": "istres",
+    "ciotat": "ciotat",
+    "vitrolles": "vitrolles",
+}
 
 # Paramètres de tracking à retirer pour la normalisation d'URL
 DEFAULT_TRACKING_PARAMS: frozenset[str] = frozenset(
@@ -76,6 +110,106 @@ def normalize_job_url(
     return urlunparse((scheme, netloc, path, "", query, ""))
 
 
+def strip_accents(text: str) -> str:
+    """Remove diacritical marks from characters for uniform text comparison.
+
+    Args:
+        text: Raw text string.
+
+    Returns:
+        str: Text with diacritics removed.
+    """
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in normalized if not unicodedata.combining(c))
+
+
+def clean_company_name(company: str) -> str:
+    """Normalize employer name by stripping legal forms and special characters.
+
+    Args:
+        company: Raw company name.
+
+    Returns:
+        str: Sanitized lowercase identifier.
+    """
+    text = strip_accents(company).lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = LEGAL_SUFFIXES_REGEX.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def clean_job_title(title: str) -> str:
+    """Normalize position title by stripping contract types, gender tags, and symbols.
+
+    Args:
+        title: Raw job title string.
+
+    Returns:
+        str: Sanitized lowercase role title.
+    """
+    text = strip_accents(title).lower()
+    text = JOB_TAGS_REGEX.sub(" ", text)
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def clean_location(location: str) -> str:
+    """Normalize geographical location to a canonical city, department, or remote tag.
+
+    Args:
+        location: Raw location string (e.g., 'Marseille (13)', 'Télétravail').
+
+    Returns:
+        str: Canonical location token, or empty string if unidentifiable.
+    """
+    if not location:
+        return ""
+    text = strip_accents(location).lower()
+    if any(k in text for k in ("teletravail", "remote", "distance")):
+        return "remote"
+    for alias, canonical in CITY_ALIAS_MAP.items():
+        if alias in text:
+            return canonical
+    if "13" in text or "bouches du rhone" in text:
+        return "13"
+    # Nettoyage générique si aucune ville cible n'est explicitée
+    cleaned = re.sub(r"[^\w\s]", " ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned if cleaned not in ("france", "paca") else ""
+
+
+def generate_job_fingerprints(
+    company: str,
+    title: str,
+    location: str = "",
+) -> tuple[str | None, str]:
+    """Compute strict and loose SHA-256 fingerprints for cross-platform deduplication.
+
+    Args:
+        company: Hiring organization name.
+        title: Position or role title.
+        location: Optional location string.
+
+    Returns:
+        tuple[str | None, str]: A pair containing:
+            - strict_hash: Hash including location (or None if location is empty).
+            - loose_hash: Hash based on company and title only.
+    """
+    comp = clean_company_name(company)
+    tit = clean_job_title(title)
+    loc = clean_location(location)
+
+    loose_seed = f"{comp}:{tit}".encode("utf-8")
+    loose_hash = hashlib.sha256(loose_seed).hexdigest()
+
+    strict_hash: str | None = None
+    if loc:
+        strict_seed = f"{comp}:{tit}:{loc}".encode("utf-8")
+        strict_hash = hashlib.sha256(strict_seed).hexdigest()
+
+    return strict_hash, loose_hash
+
+
 class JobDatabase:
     """Async SQLite persistence manager for job records and status tracking.
 
@@ -92,7 +226,7 @@ class JobDatabase:
         self.db_path = db_path
 
     async def init_db(self) -> None:
-        """Create tables and indices, ensuring WAL mode is enabled."""
+        """Create tables and indices, ensuring schema migration and WAL mode."""
         # Création du dossier parent si nécessaire
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -101,7 +235,7 @@ class JobDatabase:
             await db.execute("PRAGMA journal_mode=WAL;")
             await db.execute("PRAGMA foreign_keys=ON;")
 
-            # Création de la table des offres d'emploi
+            # Création initiale de la table des offres d'emploi
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -114,12 +248,26 @@ class JobDatabase:
                     description TEXT NOT NULL,
                     raw_payload TEXT,
                     score INTEGER,
+                    content_hash TEXT,
+                    loose_hash TEXT,
                     status TEXT NOT NULL DEFAULT 'NEW',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 """
             )
+
+            # Migration progressive si la table existait sans les colonnes de hash
+            cursor = await db.execute("PRAGMA table_info(jobs);")
+            columns = [col[1] for col in await cursor.fetchall()]
+            if "content_hash" not in columns:
+                await db.execute(
+                    "ALTER TABLE jobs ADD COLUMN content_hash TEXT;"
+                )
+            if "loose_hash" not in columns:
+                await db.execute(
+                    "ALTER TABLE jobs ADD COLUMN loose_hash TEXT;"
+                )
 
             # Index pour accélérer le filtrage par statut et la déduplication
             await db.execute(
@@ -128,6 +276,14 @@ class JobDatabase:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_jobs_norm_url "
                 "ON jobs(normalized_url);"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_content_hash "
+                "ON jobs(content_hash);"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_loose_hash "
+                "ON jobs(loose_hash);"
             )
             await db.commit()
 
@@ -154,9 +310,9 @@ class JobDatabase:
                     """
                     INSERT INTO jobs (
                         platform, company, title, url, normalized_url,
-                        description, raw_payload, score, status,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        description, raw_payload, score, content_hash,
+                        loose_hash, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         job.platform,
@@ -167,6 +323,8 @@ class JobDatabase:
                         job.description,
                         payload_json,
                         job.score,
+                        job.content_hash,
+                        job.loose_hash,
                         job.status.value,
                         now_iso,
                         now_iso,
@@ -227,6 +385,136 @@ class JobDatabase:
             if row is None:
                 return None
             return self._row_to_record(row)
+
+    async def find_existing_duplicate(
+        self,
+        content_hash: str | None,
+        loose_hash: str,
+        strict_window_days: int = DEFAULT_STRICT_WINDOW_DAYS,
+        loose_window_days: int = DEFAULT_LOOSE_WINDOW_DAYS,
+    ) -> tuple[JobRecord | None, str | None]:
+        """Detect if an incoming job matches an existing posting across platforms.
+
+        Evaluates against a strict fingerprint (with location) within
+        strict_window_days (default 30), falling back to a loose fingerprint
+        (company + title) within loose_window_days (default 14).
+
+        Args:
+            content_hash: Strict fingerprint including location (if available).
+            loose_hash: Loose fingerprint of company and title.
+            strict_window_days: Max age in days for a strict match (default 30).
+            loose_window_days: Max age in days for a loose match (default 14).
+
+        Returns:
+            tuple[JobRecord | None, str | None]: The matched record and rule
+                name ('strict' or 'loose'), or (None, None) if no duplicate.
+        """
+        now = datetime.now(timezone.utc)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            # 1. Vérification stricte : Entreprise + Titre + Localisation
+            if content_hash:
+                strict_cutoff = (
+                    now - timedelta(days=strict_window_days)
+                ).isoformat()
+                cursor = await db.execute(
+                    """
+                    SELECT * FROM jobs
+                    WHERE content_hash = ? AND created_at >= ?
+                    ORDER BY created_at DESC LIMIT 1;
+                    """,
+                    (content_hash, strict_cutoff),
+                )
+                row = await cursor.fetchone()
+                if row is not None:
+                    return self._row_to_record(row), "strict"
+
+            # 2. Vérification tolérante : Entreprise + Titre (< 14 jours)
+            loose_cutoff = (
+                now - timedelta(days=loose_window_days)
+            ).isoformat()
+            cursor = await db.execute(
+                """
+                SELECT * FROM jobs
+                WHERE loose_hash = ? AND created_at >= ?
+                ORDER BY created_at DESC LIMIT 1;
+                """,
+                (loose_hash, loose_cutoff),
+            )
+            row = await cursor.fetchone()
+            if row is not None:
+                return self._row_to_record(row), "loose"
+
+            return None, None
+
+    async def add_alternate_url(
+        self,
+        job_id: int,
+        platform: str,
+        url: str,
+    ) -> bool:
+        """Enrich an existing job record with an alternate portal URL.
+
+        Args:
+            job_id: Primary key of target JobRecord.
+            platform: Secondary source identifier (e.g. 'indeed', 'hellowork').
+            url: Destination URL on the secondary source.
+
+        Returns:
+            bool: True if record was found and updated, False otherwise.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT raw_payload, url FROM jobs WHERE id = ?;",
+                (job_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return False
+
+            raw_payload_text = row["raw_payload"]
+            original_url = row["url"]
+            payload = (
+                json.loads(raw_payload_text)
+                if raw_payload_text is not None
+                else {}
+            )
+
+            # Ne pas dupliquer si c'est déjà l'URL principale
+            if original_url == url:
+                return False
+
+            alternate_urls: list[dict[str, str]] = payload.setdefault(
+                "alternate_urls", []
+            )
+
+            # Vérifier si cette URL n'est pas déjà présente
+            for entry in alternate_urls:
+                if entry.get("url") == url:
+                    return False
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            alternate_urls.append(
+                {
+                    "platform": platform,
+                    "url": url,
+                    "merged_at": now_iso,
+                }
+            )
+
+            updated_payload_text = json.dumps(payload)
+            update_cursor = await db.execute(
+                """
+                UPDATE jobs
+                SET raw_payload = ?, updated_at = ?
+                WHERE id = ?;
+                """,
+                (updated_payload_text, now_iso, job_id),
+            )
+            await db.commit()
+            return update_cursor.rowcount > 0
 
     async def get_jobs_by_status(
         self,
@@ -335,6 +623,13 @@ class JobDatabase:
             else None
         )
 
+        content_hash = (
+            row["content_hash"] if "content_hash" in row.keys() else None
+        )
+        loose_hash = (
+            row["loose_hash"] if "loose_hash" in row.keys() else None
+        )
+
         return JobRecord(
             id=row["id"],
             platform=row["platform"],
@@ -345,6 +640,8 @@ class JobDatabase:
             description=row["description"],
             raw_payload=raw_payload,
             score=row["score"],
+            content_hash=content_hash,
+            loose_hash=loose_hash,
             status=JobStatus(row["status"]),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),

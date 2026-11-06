@@ -16,6 +16,7 @@ from scrapers.cma_cgm import CMACGMScraper
 from scrapers.engine import ScraperEngine
 from scrapers.france_travail import FranceTravailScraper
 from scrapers.hellowork import HelloWorkScraper
+from scrapers.indeed import IndeedScraper
 from scrapers.wttj import WTTJScraper
 
 # Mots-clés par défaut alignés sur le profil du candidat
@@ -91,6 +92,7 @@ class JobHunterOrchestrator:
         self.scraper_engine.register_scraper(FranceTravailScraper())
         self.scraper_engine.register_scraper(CMACGMScraper())
         self.scraper_engine.register_scraper(HelloWorkScraper())
+        self.scraper_engine.register_scraper(IndeedScraper())
 
     async def run_pipeline_cycle(
         self,

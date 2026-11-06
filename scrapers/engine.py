@@ -1,6 +1,10 @@
 """Scraping orchestration engine managing collection and deduplication."""
 
-from db.database import JobDatabase, normalize_job_url
+from db.database import (
+    JobDatabase,
+    generate_job_fingerprints,
+    normalize_job_url,
+)
 from db.models import JobRecord, JobStatus
 from scrapers.base import BaseScraper
 
@@ -68,12 +72,40 @@ class ScraperEngine:
                     # Normalisation stricte de l'URL pour la déduplication
                     norm_url = normalize_job_url(raw.url)
 
-                    # Vérification préliminaire en base de données
+                    # L1: Vérification préliminaire d'URL en base de données
                     existing = await self.db.get_job_by_normalized_url(
                         norm_url
                     )
                     if existing is not None:
-                        # Offre déjà connue, on ignore pour éviter un appel LLM
+                        # Offre déjà connue avec la même URL, on ignore
+                        continue
+
+                    # L2: Empreintes sémantiques (strict et tolérant)
+                    strict_hash, loose_hash = generate_job_fingerprints(
+                        company=raw.company,
+                        title=raw.title,
+                        location=raw.location,
+                    )
+
+                    # Détection d'un doublon multi-sources (Option C)
+                    duplicate, rule = await self.db.find_existing_duplicate(
+                        content_hash=strict_hash,
+                        loose_hash=loose_hash,
+                        strict_window_days=30,
+                        loose_window_days=14,
+                    )
+                    if duplicate is not None and duplicate.id is not None:
+                        # Offre déjà répertoriée ailleurs : fusion de la source
+                        await self.db.add_alternate_url(
+                            job_id=duplicate.id,
+                            platform=raw.platform,
+                            url=raw.url,
+                        )
+                        print(
+                            f"🔗 [Dedup {rule}] Offre '{raw.company}' - "
+                            f"'{raw.title}' ({raw.platform}) fusionnée "
+                            f"avec #{duplicate.id} ({duplicate.platform})."
+                        )
                         continue
 
                     job_record = JobRecord(
@@ -84,6 +116,8 @@ class ScraperEngine:
                         normalized_url=norm_url,
                         description=raw.description,
                         raw_payload=raw.raw_payload,
+                        content_hash=strict_hash,
+                        loose_hash=loose_hash,
                         status=JobStatus.NEW,
                     )
 
