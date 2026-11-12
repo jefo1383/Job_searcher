@@ -5,11 +5,11 @@ from urllib.parse import urlparse
 from config.criteria import SearchCriteria
 from db.database import (
     JobDatabase,
-    generate_job_fingerprints,
+    generate_all_fingerprints,
     normalize_job_url,
 )
 from db.models import JobRecord, JobStatus
-from scrapers.base import BaseScraper
+from scrapers.base import BaseScraper, is_excluded_title
 from scrapers.generic_browser import GenericBrowserScraper
 
 
@@ -179,6 +179,7 @@ class ScraperEngine:
         newly_inserted: list[JobRecord] = []
         collected_count = 0
         inserted_count = 0
+        excluded_title_count = 0
 
         try:
             async for raw in scraper.scrape(
@@ -187,39 +188,82 @@ class ScraperEngine:
                 limit=limit,
             ):
                 collected_count += 1
+                # Pré-filtre immédiat par titre (séniorité / direction)
+                if is_excluded_title(raw.title):
+                    excluded_title_count += 1
+                    continue
+
                 norm_url = normalize_job_url(raw.url)
 
                 # L1: Vérification préliminaire d'URL en base de données
                 existing = await self.db.get_job_by_normalized_url(norm_url)
                 if existing is not None:
+                    if existing.id is not None:
+                        _, requeued = await self.db.merge_duplicate_offer(
+                            job_id=existing.id,
+                            platform=raw.platform,
+                            url=raw.url,
+                            description=raw.description,
+                            company=raw.company,
+                        )
+                        if requeued:
+                            refreshed = await self.db.get_job_by_id(existing.id)
+                            if refreshed is not None:
+                                newly_inserted.append(refreshed)
+                            print(
+                                f"🔄 [Dedup url] Description nettement plus "
+                                f"complète pour #{existing.id} : ré-évaluation."
+                            )
                     continue
 
-                # L2: Empreintes sémantiques (strict et tolérant)
-                strict_hash, loose_hash = generate_job_fingerprints(
-                    company=raw.company,
-                    title=raw.title,
-                    location=raw.location,
+                # L2 + B1: Empreintes sémantiques (strict, tolérant, titre+lieu)
+                strict_hash, loose_hash, title_loc_hash = (
+                    generate_all_fingerprints(
+                        company=raw.company,
+                        title=raw.title,
+                        location=raw.location,
+                    )
                 )
 
-                # Détection d'un doublon multi-sources (Option C)
+                # Détection d'un doublon multi-sources (Option C + B1)
                 duplicate, rule = await self.db.find_existing_duplicate(
                     content_hash=strict_hash,
                     loose_hash=loose_hash,
+                    title_loc_hash=title_loc_hash,
+                    company=raw.company,
+                    title=raw.title,
+                    description=raw.description,
                     strict_window_days=30,
                     loose_window_days=14,
                 )
                 if duplicate is not None and duplicate.id is not None:
-                    await self.db.add_alternate_url(
+                    _, requeued = await self.db.merge_duplicate_offer(
                         job_id=duplicate.id,
                         platform=raw.platform,
                         url=raw.url,
+                        description=raw.description,
+                        company=raw.company,
                     )
-                    print(
-                        f"🔗 [Dedup {rule}] Offre '{raw.company}' - "
-                        f"'{raw.title}' ({raw.platform}) fusionnée "
-                        f"avec #{duplicate.id} ({duplicate.platform})."
-                    )
+                    if requeued:
+                        refreshed = await self.db.get_job_by_id(duplicate.id)
+                        if refreshed is not None:
+                            newly_inserted.append(refreshed)
+                        print(
+                            f"🔄 [Dedup {rule}] Description nettement plus "
+                            f"complète pour #{duplicate.id} ({duplicate.platform}) "
+                            "-> remise en file pour ré-évaluation."
+                        )
+                    else:
+                        print(
+                            f"🔗 [Dedup {rule}] Offre '{raw.company}' - "
+                            f"'{raw.title}' ({raw.platform}) fusionnée "
+                            f"avec #{duplicate.id} ({duplicate.platform})."
+                        )
                     continue
+
+                payload = dict(raw.raw_payload) if raw.raw_payload else {}
+                if raw.location and "location" not in payload:
+                    payload["location"] = raw.location
 
                 job_record = JobRecord(
                     platform=raw.platform,
@@ -228,9 +272,10 @@ class ScraperEngine:
                     url=raw.url,
                     normalized_url=norm_url,
                     description=raw.description,
-                    raw_payload=raw.raw_payload,
+                    raw_payload=payload or None,
                     content_hash=strict_hash,
                     loose_hash=loose_hash,
+                    title_loc_hash=title_loc_hash,
                     status=JobStatus.NEW,
                 )
 
@@ -239,9 +284,14 @@ class ScraperEngine:
                     newly_inserted.append(saved)
                     inserted_count += 1
 
+            excluded_note = (
+                f" ({excluded_title_count} filtered by title)"
+                if excluded_title_count > 0
+                else ""
+            )
             print(
                 f"✓ [{scraper.name}] {collected_count} items analyzed, "
-                f"{inserted_count} new unique jobs inserted."
+                f"{inserted_count} new unique jobs inserted{excluded_note}."
             )
 
         except Exception as err:

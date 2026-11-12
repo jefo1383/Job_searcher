@@ -6,12 +6,12 @@ from collections.abc import Sequence
 import sys
 from typing import Any
 
-from config.criteria import parse_search_criteria_file
+from config.criteria import SearchCriteria, parse_search_criteria_file
 from config.settings import Settings, get_settings
 from core.analyzer import JobAnalyzer
 from core.generator import JobGenerator
 from core.profile_builder import ProfileBuilder
-from db.database import JobDatabase
+from db.database import JobDatabase, is_anonymous_company
 from db.models import JobStatus
 from hitl.telegram_bot import JobHunterBot
 from scrapers.bpce import BpceScraper
@@ -19,11 +19,13 @@ from scrapers.cma_cgm import CMACGMScraper
 from scrapers.engine import ScraperEngine
 from scrapers.france_travail import FranceTravailScraper
 from scrapers.hellowork import HelloWorkScraper
-from scrapers.indeed import IndeedScraper
+from scrapers.indeed import IndeedScraper, ReadyCallback
+from scrapers.la_bonne_alternance import LaBonneAlternanceScraper
 from scrapers.linkedin import LinkedInScraper
 from scrapers.orange_cyberdefense import OrangeCyberScraper
+from scrapers.thales import ThalesScraper
 from scrapers.vinci import VinciScraper
-from scrapers.workday import AirbusScraper, FDJScraper, ThalesScraper
+from scrapers.workday import AirbusScraper, FDJScraper
 from scrapers.wttj import WTTJScraper
 
 # Mots-clés par défaut alignés sur le profil du candidat
@@ -95,15 +97,18 @@ class JobHunterOrchestrator:
             bot_token=self.settings.telegram_bot_token.get_secret_value(),
             chat_id=self.settings.telegram_chat_id,
             profile_builder=self.profile_builder,
+            indeed_callback=self._telegram_indeed_runner,
         )
 
         # 5. Moteur de scraping multi-sources (Job boards + Portails ATS cibles)
+        self.indeed_scraper = IndeedScraper()
         self.scraper_engine = ScraperEngine(db=self.db)
         self.scraper_engine.register_scraper(WTTJScraper())
         self.scraper_engine.register_scraper(FranceTravailScraper())
+        self.scraper_engine.register_scraper(LaBonneAlternanceScraper())
         self.scraper_engine.register_scraper(CMACGMScraper())
         self.scraper_engine.register_scraper(HelloWorkScraper())
-        self.scraper_engine.register_scraper(IndeedScraper())
+        self.scraper_engine.register_scraper(self.indeed_scraper)
         self.scraper_engine.register_scraper(LinkedInScraper())
         self.scraper_engine.register_scraper(AirbusScraper())
         self.scraper_engine.register_scraper(ThalesScraper())
@@ -111,6 +116,64 @@ class JobHunterOrchestrator:
         self.scraper_engine.register_scraper(OrangeCyberScraper())
         self.scraper_engine.register_scraper(BpceScraper())
         self.scraper_engine.register_scraper(VinciScraper())
+
+    def _build_active_criteria(
+        self,
+        keywords: list[str] | None = None,
+        locations: list[str] | None = None,
+    ) -> SearchCriteria:
+        """Load search_criteria.txt and apply optional overrides or defaults."""
+        criteria = parse_search_criteria_file(
+            self.settings.search_criteria_path
+        )
+        active_keywords = keywords or criteria.keywords or DEFAULT_KEYWORDS
+        active_locations = locations or criteria.locations or DEFAULT_LOCATIONS
+        return criteria.model_copy(
+            update={
+                "keywords": active_keywords,
+                "locations": active_locations,
+            }
+        )
+
+    async def _telegram_indeed_runner(
+        self,
+        wait_for_ready: ReadyCallback,
+    ) -> tuple[int, int]:
+        """Run interactive Indeed flow triggered from Telegram /indeed."""
+        return await self.run_indeed_interactive(wait_for_ready=wait_for_ready)
+
+    async def run_indeed_interactive(
+        self,
+        wait_for_ready: ReadyCallback | None = None,
+        limit_per_source: int = 20,
+    ) -> tuple[int, int]:
+        """Launch visible Indeed browser, await user confirmation, and score.
+
+        Args:
+            wait_for_ready: Optional async prompt callback (Telegram/CLI).
+            limit_per_source: Maximum listings to extract from Indeed.
+
+        Returns:
+            tuple[int, int]: Count of newly inserted jobs and qualified alerts.
+        """
+        active_criteria = self._build_active_criteria()
+        interactive_indeed = IndeedScraper(
+            headless=False,
+            interactive=True,
+            wait_for_ready=wait_for_ready,
+        )
+        new_jobs = await self.scraper_engine._process_scraper(
+            scraper=interactive_indeed,
+            keywords=active_criteria.keywords,
+            locations=active_criteria.locations,
+            limit=limit_per_source,
+        )
+        indeed_ids = [job.id for job in new_jobs if job.id is not None]
+        qualified_count = await self._evaluate_and_notify_pending(
+            active_criteria,
+            job_ids=indeed_ids,
+        )
+        return len(new_jobs), qualified_count
 
     async def run_pipeline_cycle(
         self,
@@ -131,19 +194,9 @@ class JobHunterOrchestrator:
         Returns:
             int: Count of newly qualified offers notified via Telegram.
         """
-        # Rechargement dynamique des critères depuis le fichier texte
-        criteria = parse_search_criteria_file(
-            self.settings.search_criteria_path
-        )
-        active_keywords = keywords or criteria.keywords or DEFAULT_KEYWORDS
-        active_locations = locations or criteria.locations or DEFAULT_LOCATIONS
-
-        # Mise à jour du modèle pour injecter les mots-clés et villes actives
-        active_criteria = criteria.model_copy(
-            update={
-                "keywords": active_keywords,
-                "locations": active_locations,
-            }
+        active_criteria = self._build_active_criteria(
+            keywords=keywords,
+            locations=locations,
         )
 
         print("\n🚀 [Cycle] Démarrage de la collecte d'offres d'emploi...")
@@ -153,9 +206,27 @@ class JobHunterOrchestrator:
         )
         print(f"📦 [Cycle] {len(new_jobs)} nouvelle(s) offre(s) insérée(s).")
 
-        # Récupération des offres en attente d'évaluation (statut NEW)
-        pending_eval_jobs = await self.db.get_jobs_by_status(
-            JobStatus.NEW, limit=100
+        if self.indeed_scraper.last_run_blocked:
+            await self.bot.send_info_message(
+                "ℹ️ <b>Indeed a bloqué la collecte automatique.</b>\n"
+                "Envoyez /indeed ici (ou lancez <code>--indeed</code> en "
+                "terminal) lorsque vous êtes devant votre écran pour ouvrir le "
+                "navigateur manuellement."
+            )
+
+        return await self._evaluate_and_notify_pending(active_criteria)
+
+    async def _evaluate_and_notify_pending(
+        self,
+        active_criteria: SearchCriteria,
+        job_ids: list[int] | None = None,
+    ) -> int:
+        """Atomically claim NEW offers, score with Gemini, and send alerts."""
+
+        # Réclamation atomique (NEW -> EVALUATING) pour éviter les doublons
+        pending_eval_jobs = await self.db.claim_pending_new_jobs(
+            limit=100,
+            job_ids=job_ids,
         )
         if not pending_eval_jobs:
             print("✨ [Cycle] Aucune offre en attente d'évaluation.")
@@ -188,20 +259,11 @@ class JobHunterOrchestrator:
                     )
                 )
 
-                # Rectification du nom d'entreprise si détecté par Gemini
-                is_generic_company = any(
-                    token in job.company.lower()
-                    for token in [
-                        "hellowork",
-                        "listing",
-                        "entreprise",
-                        "unknown",
-                        "inconnue",
-                        "confidentiel",
-                    ]
-                )
-                if eval_res.company and (is_generic_company or not job.company):
+                # Rectification du nom d'entreprise si générique ou masqué
+                if eval_res.company and is_anonymous_company(job.company):
                     job.company = eval_res.company.strip()
+                if eval_res.contract_type:
+                    job.contract_type = eval_res.contract_type.strip()
 
                 if is_qualified:
                     # Génération du pitch ciblé et de la lettre pour Telegram/ATS
@@ -214,21 +276,28 @@ class JobHunterOrchestrator:
                         platform=job.platform,
                     )
 
-                    # Mise à jour du statut et de l'entreprise en base de données
+                    # Mise à jour du statut, de l'entreprise et du contrat en base
                     await self.db.update_job_evaluation(
                         job_id=job.id,
                         score=eval_res.score,
                         status=JobStatus.PENDING_REVIEW,
                         company=job.company,
+                        contract_type=job.contract_type,
                     )
 
-                    # Envoi de la notification interactive sur Telegram
-                    notified = await self.bot.send_job_alert(
-                        job=job,
-                        analysis=eval_res,
-                        pitch=app_doc.quick_pitch,
+                    # Verrou atomique pour garantir une notification Telegram unique
+                    notified = False
+                    if await self.db.mark_job_notified(job.id):
+                        notified = await self.bot.send_job_alert(
+                            job=job,
+                            analysis=eval_res,
+                            pitch=app_doc.quick_pitch,
+                        )
+                        if not notified:
+                            await self.db.clear_job_notified(job.id)
+                    status_log = (
+                        "notifiée sur Telegram" if notified else "sauvegardée"
                     )
-                    status_log = "notifiée sur Telegram" if notified else "sauvegardée"
                     print(
                         f"  🎯 Qualifiée ({eval_res.score}/100) : "
                         f"{job.company} - {job.title} [{status_log}]"
@@ -240,7 +309,13 @@ class JobHunterOrchestrator:
                         job_id=job.id,
                         score=eval_res.score,
                         status=JobStatus.REJECTED,
-                        company=job.company if eval_res.company else None,
+                        company=(
+                            eval_res.company
+                            if eval_res.company
+                            and is_anonymous_company(job.company)
+                            else None
+                        ),
+                        contract_type=job.contract_type,
                     )
                     print(
                         f"  ❌ Rejetée ({eval_res.score}/100) : "
@@ -248,6 +323,7 @@ class JobHunterOrchestrator:
                     )
 
             except Exception as err:
+                await self.db.release_claimed_job(job.id)
                 print(
                     f"  ⚠️ Erreur lors de l'évaluation de l'offre #{job.id} "
                     f"({job.company}) : {err}"
@@ -292,6 +368,7 @@ class JobHunterOrchestrator:
         self,
         once: bool = False,
         bot_only: bool = False,
+        indeed: bool = False,
         update_profile: bool = False,
         interval_hours: float = 168.0,
         keywords: list[str] | None = None,
@@ -303,6 +380,7 @@ class JobHunterOrchestrator:
         Args:
             once: If True, execute one collection cycle and exit.
             bot_only: If True, only launch interactive Telegram bot.
+            indeed: If True, launch visible Chrome for manual Indeed scrape.
             update_profile: If True, force profile.md regeneration from CV.
             interval_hours: Hours between automated scraping cycles.
             keywords: Custom search keywords list.
@@ -336,6 +414,21 @@ class JobHunterOrchestrator:
         telegram_app = self.bot.application
         await telegram_app.initialize()
         await telegram_app.start()
+
+        if indeed:
+            # Mode interactif dédié Indeed avec navigateur visible
+            try:
+                collected, qualified = await self.run_indeed_interactive(
+                    limit_per_source=limit_per_source
+                )
+                print(
+                    f"🏁 [Indeed] {collected} offre(s) collectée(s), "
+                    f"{qualified} qualifiée(s)."
+                )
+            finally:
+                await telegram_app.stop()
+                await telegram_app.shutdown()
+            return
 
         if once:
             # Mode One-Shot : exécution immédiate sans boucle persistante
@@ -410,6 +503,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Only launch Telegram bot to answer commands without scraping.",
     )
     parser.add_argument(
+        "--indeed",
+        action="store_true",
+        dest="indeed",
+        help="Open visible browser for manual Indeed loading, then scrape.",
+    )
+    parser.add_argument(
         "--update-profile",
         action="store_true",
         dest="update_profile",
@@ -448,6 +547,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             orchestrator.start(
                 once=args.once,
                 bot_only=args.bot_only,
+                indeed=args.indeed,
                 update_profile=args.update_profile,
                 interval_hours=args.interval_hours,
                 limit_per_source=args.limit,

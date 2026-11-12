@@ -7,8 +7,13 @@ from typing import Any
 
 import httpx
 
-from scrapers.base import BaseScraper
+from core.location_matcher import LocationMatcher
+from scrapers.base import BaseScraper, is_excluded_title
 from scrapers.models import RawJobListing
+
+# Nombre maximal de pages Workday inspectées par mot-clé (réglable)
+DEFAULT_MAX_WORKDAY_PAGES: int = 3
+DEFAULT_WORKDAY_PAGE_SIZE: int = 20
 
 # En-têtes HTTP simulant un navigateur standard
 DEFAULT_WORKDAY_HEADERS: dict[str, str] = {
@@ -46,6 +51,8 @@ class WorkdayScraper(BaseScraper):
         portal_path: str,
         allowed_locations: list[str] | None = None,
         timeout_seconds: float = 15.0,
+        location_matcher: LocationMatcher | None = None,
+        max_pages: int = DEFAULT_MAX_WORKDAY_PAGES,
     ) -> None:
         """Initialize the Workday scraper.
 
@@ -57,6 +64,8 @@ class WorkdayScraper(BaseScraper):
             portal_path: CXS routing segment for target site.
             allowed_locations: List of location keywords to retain.
             timeout_seconds: Max wait duration per HTTP call.
+            location_matcher: Shared geo validator with 25km radius check.
+            max_pages: Max CXS pages inspected per keyword before moving on.
         """
         super().__init__(name=name)
         self.company_name = company_name
@@ -67,6 +76,8 @@ class WorkdayScraper(BaseScraper):
             loc.lower() for loc in (allowed_locations or [])
         ]
         self.timeout_seconds = timeout_seconds
+        self.location_matcher = location_matcher or LocationMatcher()
+        self.max_pages = max_pages
 
     async def scrape(
         self,
@@ -90,6 +101,7 @@ class WorkdayScraper(BaseScraper):
         )
 
         yielded_count = 0
+        seen_urls: set[str] = set()
         async with httpx.AsyncClient(
             headers=DEFAULT_WORKDAY_HEADERS,
             timeout=self.timeout_seconds,
@@ -99,73 +111,107 @@ class WorkdayScraper(BaseScraper):
                 if yielded_count >= limit:
                     break
 
-                payload: dict[str, Any] = {
-                    "appliedFacets": {},
-                    "limit": min(limit - yielded_count, 20),
-                    "offset": 0,
-                    "searchText": keyword,
-                }
+                for page_idx in range(self.max_pages):
+                    if yielded_count >= limit:
+                        break
 
-                try:
-                    response = await client.post(
-                        search_endpoint,
-                        json=payload,
-                    )
-                    if response.status_code != 200:
-                        continue
+                    offset = page_idx * DEFAULT_WORKDAY_PAGE_SIZE
+                    payload: dict[str, Any] = {
+                        "appliedFacets": {},
+                        "limit": DEFAULT_WORKDAY_PAGE_SIZE,
+                        "offset": offset,
+                        "searchText": keyword,
+                    }
 
-                    data = response.json()
-                    postings = data.get("jobPostings", [])
-
-                    for item in postings:
-                        if yielded_count >= limit:
+                    try:
+                        response = await client.post(
+                            search_endpoint,
+                            json=payload,
+                        )
+                        if response.status_code != 200:
                             break
 
-                        title = item.get("title", "").strip()
-                        locations_text = item.get("locationsText", "").strip()
-                        external_path = item.get("externalPath", "").strip()
+                        data = response.json()
+                        postings = data.get("jobPostings", [])
+                        if not postings:
+                            break
 
-                        if not title or not external_path:
-                            continue
+                        for item in postings:
+                            if yielded_count >= limit:
+                                break
 
-                        # Vérification du filtre géographique
-                        if not self._is_location_allowed(locations_text):
-                            continue
+                            title = item.get("title", "").strip()
+                            locations_text = item.get(
+                                "locationsText", ""
+                            ).strip()
+                            external_path = item.get(
+                                "externalPath", ""
+                            ).strip()
 
-                        # Construction des URL canoniques et de détail
-                        detail_endpoint = (
-                            f"https://{self.tenant_domain}/wday/cxs/"
-                            f"{self.company_path}/{self.portal_path}"
-                            f"{external_path}"
+                            if not title or not external_path:
+                                continue
+
+                            if is_excluded_title(title):
+                                continue
+
+                            public_url = (
+                                f"https://{self.tenant_domain}/"
+                                f"{self.portal_path}{external_path}"
+                            )
+                            if public_url in seen_urls:
+                                continue
+
+                            # Vérification géographique (critères + rayon 25 km)
+                            if not await self.location_matcher.is_location_allowed(
+                                raw_location=locations_text,
+                                extra_locations=self.allowed_locations,
+                                client=client,
+                            ):
+                                continue
+
+                            seen_urls.add(public_url)
+
+                            # Construction de l'URL de détail CXS
+                            detail_endpoint = (
+                                f"https://{self.tenant_domain}/wday/cxs/"
+                                f"{self.company_path}/{self.portal_path}"
+                                f"{external_path}"
+                            )
+
+                            # Récupération de la description détaillée
+                            description = await self._fetch_job_description(
+                                client=client,
+                                detail_endpoint=detail_endpoint,
+                            )
+
+                            enriched_payload = dict(item)
+                            enriched_payload["is_easy_apply"] = False
+
+                            yield RawJobListing(
+                                platform=self.name,
+                                company=self.company_name,
+                                title=title,
+                                url=public_url,
+                                description=description or title,
+                                location=locations_text,
+                                raw_payload=enriched_payload,
+                            )
+                            yielded_count += 1
+
+                        total_available = int(data.get("total") or 0)
+                        if (
+                            offset + DEFAULT_WORKDAY_PAGE_SIZE
+                            >= total_available
+                            or len(postings) < DEFAULT_WORKDAY_PAGE_SIZE
+                        ):
+                            break
+
+                    except Exception as err:
+                        print(
+                            f"⚠️ [{self.name}] Error querying keyword "
+                            f"'{keyword}': {err}"
                         )
-                        public_url = (
-                            f"https://{self.tenant_domain}/"
-                            f"{self.portal_path}{external_path}"
-                        )
-
-                        # Récupération de la description détaillée
-                        description = await self._fetch_job_description(
-                            client=client,
-                            detail_endpoint=detail_endpoint,
-                        )
-
-                        yield RawJobListing(
-                            platform=self.name,
-                            company=self.company_name,
-                            title=title,
-                            url=public_url,
-                            description=description or title,
-                            location=locations_text,
-                            raw_payload=item,
-                        )
-                        yielded_count += 1
-
-                except Exception as err:
-                    print(
-                        f"⚠️ [{self.name}] Error querying keyword "
-                        f"'{keyword}': {err}"
-                    )
-                    continue
+                        break
 
     def _is_location_allowed(self, location_str: str) -> bool:
         """Verify if a job's location matches target geographical filters.
@@ -223,38 +269,15 @@ class AirbusScraper(WorkdayScraper):
         super().__init__(
             name="airbus",
             company_name="Airbus",
-            tenant_domain="airbus.wd3.myworkdayjobs.com",
-            company_path="airbus",
+            tenant_domain="ag.wd3.myworkdayjobs.com",
+            company_path="ag",
             portal_path="Airbus",
             allowed_locations=[
                 "marignane",
                 "vitrolles",
                 "aix",
                 "marseille",
-                "13",
-                "remote",
-                "télétravail",
-            ],
-        )
-
-
-class ThalesScraper(WorkdayScraper):
-    """Specialized Workday scraper for Thales targeting PACA defense/cyber sites."""
-
-    def __init__(self) -> None:
-        """Initialize Thales scraper with Aubagne, La Ciotat, and Aix filters."""
-        super().__init__(
-            name="thales",
-            company_name="Thales",
-            tenant_domain="thales.wd3.myworkdayjobs.com",
-            company_path="thales",
-            portal_path="Careers",
-            allowed_locations=[
-                "aubagne",
-                "la ciotat",
-                "ciotat",
-                "aix",
-                "marseille",
+                "marseille area",
                 "13",
                 "remote",
                 "télétravail",

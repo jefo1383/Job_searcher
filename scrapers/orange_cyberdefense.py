@@ -8,6 +8,7 @@ from urllib.parse import urljoin
 
 import httpx
 
+from core.location_matcher import LocationMatcher
 from scrapers.base import BaseScraper
 from scrapers.models import RawJobListing
 
@@ -38,7 +39,11 @@ def _clean_html(raw_html: str | None) -> str:
     if not raw_html:
         return ""
     unescaped = html.unescape(raw_html)
+    # Double décodage si les balises HTML étaient encodées (&lt;p&gt;)
+    if "<" not in unescaped and "&lt;" in raw_html:
+        unescaped = html.unescape(unescaped)
     clean_text = re.sub(r"<[^>]+>", " ", unescaped)
+    clean_text = html.unescape(clean_text)
     return re.sub(r"\s+", " ", clean_text).strip()
 
 
@@ -58,6 +63,7 @@ class OrangeCyberScraper(BaseScraper):
         entity: str = "Orange Cyberdefense",
         allowed_locations: list[str] | None = None,
         timeout_seconds: float = 15.0,
+        location_matcher: LocationMatcher | None = None,
     ) -> None:
         """Initialize the Orange Cyberdefense scraper.
 
@@ -66,6 +72,7 @@ class OrangeCyberScraper(BaseScraper):
             entity: Filter segment for target Orange business unit.
             allowed_locations: List of target location tokens.
             timeout_seconds: Network call timeout in seconds.
+            location_matcher: Shared geo validator with 25km radius check.
         """
         super().__init__(name="orange_cyberdefense")
         self.company_name = company_name
@@ -78,6 +85,7 @@ class OrangeCyberScraper(BaseScraper):
             )
         ]
         self.timeout_seconds = timeout_seconds
+        self.location_matcher = location_matcher or LocationMatcher()
 
     async def scrape(
         self,
@@ -151,8 +159,12 @@ class OrangeCyberScraper(BaseScraper):
                         if not is_cyber:
                             continue
 
-                        # Vérification de la zone géographique
-                        if not self._is_location_allowed(raw_loc):
+                        # Vérification de la zone géographique (rayon 25 km)
+                        if not await self.location_matcher.is_location_allowed(
+                            raw_location=raw_loc,
+                            extra_locations=self.allowed_locations,
+                            client=client,
+                        ):
                             continue
 
                         apply_url = item.get("applyUrl")
@@ -162,7 +174,20 @@ class OrangeCyberScraper(BaseScraper):
                         else:
                             public_url = f"{ORANGE_JOB_BASE_URL}/{job_id}"
 
-                        desc = item.get("descriptionTeaser") or title
+                        raw_contract = str(
+                            item.get("contractType") or item.get("type") or ""
+                        ).strip()
+                        teaser = item.get("descriptionTeaser") or title
+                        desc_body = await self._fetch_full_description(
+                            client=client,
+                            job_url=public_url,
+                            fallback_text=teaser,
+                        )
+                        desc = (
+                            f"Contrat : {raw_contract}\n{desc_body}"
+                            if raw_contract
+                            else desc_body
+                        )
 
                         yield RawJobListing(
                             platform=self.name,
@@ -173,6 +198,8 @@ class OrangeCyberScraper(BaseScraper):
                             location=raw_loc,
                             raw_payload={
                                 "job_id": job_id,
+                                "contract_type": raw_contract,
+                                "is_easy_apply": False,
                                 "apply_url": apply_url or public_url,
                                 "raw_item": item,
                             },
@@ -185,6 +212,61 @@ class OrangeCyberScraper(BaseScraper):
                         f"'{keyword}': {err}"
                     )
                     continue
+
+    async def _fetch_full_description(
+        self,
+        client: httpx.AsyncClient,
+        job_url: str,
+        fallback_text: str,
+    ) -> str:
+        """Fetch full offer text from Orange Jobs detail page.
+
+        Args:
+            client: Active HTTPX client session.
+            job_url: Public Orange Jobs detail URL.
+            fallback_text: Short teaser text if detail fetch fails.
+
+        Returns:
+            str: Full plain-text job description, or fallback teaser.
+        """
+        try:
+            res = await client.get(job_url)
+            if res.status_code != 200:
+                return fallback_text
+
+            # 1. Extraction depuis l'objet embarqué Phenom People DDO
+            idx = res.text.find("phApp.ddo = ")
+            if idx != -1:
+                decoder = json.JSONDecoder()
+                ddo, _ = decoder.raw_decode(res.text[idx + len("phApp.ddo = ") :])
+                job_data = ddo.get("jobDetail", {}).get("data", {}).get("job", {})
+                raw_desc = (
+                    job_data.get("descriptionFr")
+                    or job_data.get("description")
+                    or ""
+                )
+                cleaned = _clean_html(raw_desc)
+                if len(cleaned) > len(fallback_text):
+                    return cleaned
+
+            # 2. Repli JSON-LD JobPosting
+            ld_blocks = re.findall(
+                r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>'
+                r"(.*?)</script>",
+                res.text,
+                re.DOTALL | re.IGNORECASE,
+            )
+            for block in ld_blocks:
+                if "JobPosting" not in block:
+                    continue
+                parsed = json.loads(block)
+                if isinstance(parsed, dict) and parsed.get("description"):
+                    cleaned = _clean_html(str(parsed["description"]))
+                    if len(cleaned) > len(fallback_text):
+                        return cleaned
+        except Exception:
+            pass
+        return fallback_text
 
     def _is_location_allowed(self, location_str: str) -> bool:
         """Verify if job location matches target PACA/remote criteria.

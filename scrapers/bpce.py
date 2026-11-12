@@ -8,6 +8,7 @@ from urllib.parse import urljoin
 
 import httpx
 
+from core.location_matcher import LocationMatcher
 from scrapers.base import BaseScraper
 from scrapers.models import RawJobListing
 
@@ -58,6 +59,7 @@ class BpceScraper(BaseScraper):
         company_name: str = "Groupe BPCE",
         allowed_locations: list[str] | None = None,
         timeout_seconds: float = 15.0,
+        location_matcher: LocationMatcher | None = None,
     ) -> None:
         """Initialize the BPCE scraper.
 
@@ -65,6 +67,7 @@ class BpceScraper(BaseScraper):
             company_name: Name of hiring company.
             allowed_locations: List of target location tokens.
             timeout_seconds: Max network wait duration.
+            location_matcher: Shared geo validator with 25km radius check.
         """
         super().__init__(name="bpce")
         self.company_name = company_name
@@ -76,6 +79,7 @@ class BpceScraper(BaseScraper):
             )
         ]
         self.timeout_seconds = timeout_seconds
+        self.location_matcher = location_matcher or LocationMatcher()
 
     async def scrape(
         self,
@@ -150,8 +154,12 @@ class BpceScraper(BaseScraper):
                                     or ""
                                 )
 
-                        # Filtrage géographique
-                        if not self._is_location_allowed(raw_loc):
+                        # Filtrage géographique (critères + rayon 25 km)
+                        if not await self.location_matcher.is_location_allowed(
+                            raw_location=raw_loc,
+                            extra_locations=self.allowed_locations,
+                            client=client,
+                        ):
                             continue
 
                         # Extraction des URLs de consultation et de candidature directes
@@ -170,7 +178,22 @@ class BpceScraper(BaseScraper):
                             else None
                         )
 
-                        desc = _clean_text(item.get("description", "")) or title
+                        raw_contract_val = item.get("contract")
+                        if isinstance(raw_contract_val, list):
+                            raw_contract = ", ".join(
+                                str(c).strip() for c in raw_contract_val if c
+                            )
+                        elif isinstance(raw_contract_val, str):
+                            raw_contract = raw_contract_val.strip()
+                        else:
+                            raw_contract = ""
+
+                        desc_body = _clean_text(item.get("description", "")) or title
+                        desc = (
+                            f"Contrat : {raw_contract}\n{desc_body}"
+                            if raw_contract
+                            else desc_body
+                        )
 
                         yield RawJobListing(
                             platform=self.name,
@@ -181,6 +204,8 @@ class BpceScraper(BaseScraper):
                             location=raw_loc,
                             raw_payload={
                                 "brand": brand_name,
+                                "contract_type": raw_contract,
+                                "is_easy_apply": False,
                                 "apply_url": apply_url or public_url,
                                 "raw_item": item,
                             },

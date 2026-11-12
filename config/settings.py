@@ -68,6 +68,12 @@ class Settings(BaseSettings):
         description="France Travail API client secret.",
     )
 
+    # Clé API La bonne alternance (api.apprentissage.beta.gouv.fr)
+    lba_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="La bonne alternance API bearer token.",
+    )
+
     @field_validator("telegram_chat_id", mode="before")
     @classmethod
     def sanitize_optional_chat_id(cls, value: object) -> int | None:

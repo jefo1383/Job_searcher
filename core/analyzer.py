@@ -48,6 +48,11 @@ class JobAnalysisResult(BaseModel):
         description="Actual hiring company name extracted from job text "
         "if provided name is generic, missing, or portal-based.",
     )
+    contract_type: str | None = Field(
+        default=None,
+        description="Employment contract category extracted from offer: "
+        "'Alternance', 'Stage', 'CDI', 'CDD', 'Intérim', 'Freelance', or null.",
+    )
 
 
 class JobAnalyzer:
@@ -111,11 +116,14 @@ class JobAnalyzer:
             "EVALUATION INSTRUCTIONS:\n"
             "1. Strictly enforce DEALBREAKERS:\n"
             "   - If the job is located on-site outside Bouches-du-Rhône (13) "
-            "without full remote option -> is_match = False, score <= 30.\n"
+            "or in a department 13 city NOT listed in target hubs AND > 25 km "
+            "from Allauch (13190) without full remote option -> is_match = "
+            "False, score <= 30.\n"
             "   - If the role is predominantly Web Frontend / CMS / UI -> "
             "is_match = False, score <= 30.\n"
-            "   - If the job requires a Senior profile or > 3 years of software "
-            "engineering experience -> is_match = False, score <= 35.\n"
+            "   - If the job requires a Senior, 'confirmé', or 'expérimenté' "
+            "profile, or >= 3 years of experience (e.g., '3 à 4 ans', "
+            "'3+ ans', '> 3 years') -> is_match = False, score <= 35.\n"
             "   - If > 50% of the primary required technologies are missing -> "
             "is_match = False, score <= 40.\n"
             "2. Score calculation (0 to 100):\n"
@@ -128,7 +136,10 @@ class JobAnalyzer:
             "(e.g., 'HelloWork Listing', 'Entreprise', 'Unknown'), identify "
             "the real employer from the title or description and return it in "
             "the 'company' field.\n"
-            "4. Return strict structured JSON adhering to the provided schema."
+            "4. Extract the contract type into 'contract_type' using one of: "
+            "'Alternance', 'Stage', 'CDI', 'CDD', 'Intérim', 'Freelance' "
+            "(or null if absent/unclear).\n"
+            "5. Return strict structured JSON adhering to the provided schema."
         )
 
     async def analyze_job(

@@ -11,6 +11,7 @@ class JobStatus(str, Enum):
 
     Attributes:
         NEW: Newly scraped offer, pending LLM scoring.
+        EVALUATING: Atomically claimed by a worker for LLM evaluation.
         PENDING_REVIEW: Matched offer waiting for human-in-the-loop validation.
         ACCEPTED: Approved by human, queued for application.
         REJECTED: Discarded either by LLM filter or human choice.
@@ -18,6 +19,7 @@ class JobStatus(str, Enum):
     """
 
     NEW = "NEW"
+    EVALUATING = "EVALUATING"
     PENDING_REVIEW = "PENDING_REVIEW"
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
@@ -62,6 +64,10 @@ class JobRecord(BaseModel):
         le=100,
         description="Match score calculated by Gemini Flash.",
     )
+    contract_type: str | None = Field(
+        default=None,
+        description="Extracted or normalized contract type (e.g., CDI, Stage).",
+    )
     content_hash: str | None = Field(
         default=None,
         description="SHA-256 fingerprint including normalized location.",
@@ -69,6 +75,14 @@ class JobRecord(BaseModel):
     loose_hash: str | None = Field(
         default=None,
         description="SHA-256 fingerprint of company and title only.",
+    )
+    title_loc_hash: str | None = Field(
+        default=None,
+        description="SHA-256 fingerprint of normalized title and location.",
+    )
+    notified_at: datetime | None = Field(
+        default=None,
+        description="UTC timestamp when Telegram alert was sent.",
     )
     status: JobStatus = Field(
         default=JobStatus.NEW,

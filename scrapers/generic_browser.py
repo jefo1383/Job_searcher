@@ -11,8 +11,11 @@ from urllib.parse import urljoin, urlparse
 from playwright.async_api import BrowserContext, Page, async_playwright
 
 from config.settings import get_settings
-from scrapers.base import BaseScraper
+from scrapers.base import BaseScraper, is_excluded_title
 from scrapers.models import RawJobListing
+
+# Seuil minimal (caractères) avant navigation vers la fiche détaillée (réglable)
+MIN_DOM_DESCRIPTION_CHARS: int = 400
 
 # Sélecteurs fréquents de bannières de consentement cookies
 COMMON_COOKIE_SELECTORS: list[str] = [
@@ -242,6 +245,10 @@ class GenericBrowserScraper(BaseScraper):
                             )
 
                     desc = _clean_text(item.get("description") or title)
+                    payload = dict(item)
+                    payload.setdefault("is_easy_apply", False)
+                    if item.get("employmentType") and "contract_type" not in payload:
+                        payload["contract_type"] = str(item.get("employmentType"))
 
                     listings.append(
                         RawJobListing(
@@ -251,7 +258,7 @@ class GenericBrowserScraper(BaseScraper):
                             url=offer_url,
                             description=desc,
                             location=loc_str,
-                            raw_payload=item,
+                            raw_payload=payload,
                         )
                     )
 
@@ -260,6 +267,77 @@ class GenericBrowserScraper(BaseScraper):
 
         return listings
 
+    async def _fetch_detail_page(
+        self,
+        detail_page: Page,
+        offer_url: str,
+        fallback_company: str,
+        fallback_title: str,
+        fallback_text: str,
+    ) -> RawJobListing:
+        """Visit a DOM card's target URL to extract full job description.
+
+        Args:
+            detail_page: Reusable Playwright detail page.
+            offer_url: Target offer URL.
+            fallback_company: Company inferred from listing page.
+            fallback_title: Title inferred from DOM card.
+            fallback_text: Short card text fallback.
+
+        Returns:
+            RawJobListing: Enriched listing if detail text was found.
+        """
+        payload: dict[str, Any] = {
+            "scraped_text": fallback_text,
+            "is_easy_apply": False,
+        }
+        try:
+            await detail_page.goto(offer_url, wait_until="domcontentloaded")
+            await detail_page.wait_for_timeout(1200)
+
+            json_ld_jobs = await self._extract_json_ld_jobs(detail_page)
+            if json_ld_jobs:
+                best = json_ld_jobs[0]
+                return RawJobListing(
+                    platform=self.name,
+                    company=best.company or fallback_company,
+                    title=best.title or fallback_title,
+                    url=offer_url,
+                    description=best.description or fallback_text,
+                    location=best.location,
+                    raw_payload=best.raw_payload,
+                )
+
+            main_loc = detail_page.locator("main, article, [role='main']").first
+            if await main_loc.count() > 0:
+                body_text = _clean_text(await main_loc.text_content())
+            else:
+                body_text = _clean_text(
+                    await detail_page.locator("body").text_content()
+                )
+            if len(body_text) > len(fallback_text):
+                return RawJobListing(
+                    platform=self.name,
+                    company=fallback_company,
+                    title=fallback_title,
+                    url=offer_url,
+                    description=body_text[:8000],
+                    location="",
+                    raw_payload=payload,
+                )
+        except Exception:
+            pass
+
+        return RawJobListing(
+            platform=self.name,
+            company=fallback_company,
+            title=fallback_title,
+            url=offer_url,
+            description=fallback_text,
+            location="",
+            raw_payload=payload,
+        )
+
     async def _extract_dom_jobs(
         self,
         page: Page,
@@ -267,6 +345,8 @@ class GenericBrowserScraper(BaseScraper):
     ) -> list[RawJobListing]:
         """Heuristic DOM parsing extracting job cards and career links."""
         listings: list[RawJobListing] = []
+        candidates: list[tuple[str, str, str, str]] = []
+        seen_urls: set[str] = set()
         try:
             # Sélecteurs courants de cartes ou liens d'offres
             card_selectors = [
@@ -282,18 +362,20 @@ class GenericBrowserScraper(BaseScraper):
             ]
 
             cards = await page.locator(", ".join(card_selectors)).all()
-            found_count = 0
 
             # Extraction du nom de l'entreprise via le titre de la page
             page_title = await page.title()
-            default_company = page_title.split("-")[0].split("|")[0].strip()
+            default_company = (
+                page_title.split("-")[0].split("|")[0].strip() or "Entreprise"
+            )
 
             for card in cards:
-                if found_count >= limit:
+                if len(candidates) >= limit:
                     break
 
                 # Recherche de titre et lien
-                text = _clean_text(await card.text_content())
+                raw_content = await card.text_content()
+                text = _clean_text(raw_content)
                 if not text or len(text) < 10:
                     continue
 
@@ -311,22 +393,58 @@ class GenericBrowserScraper(BaseScraper):
                     continue
 
                 full_url = urljoin(page.url, link_href)
-                # Prendre la première ligne comme titre
-                lines = [line.strip() for line in text.split("\n") if line.strip()]
-                job_title = lines[0] if lines else "Offre d'emploi"
+                if full_url in seen_urls:
+                    continue
+                seen_urls.add(full_url)
 
-                listings.append(
-                    RawJobListing(
-                        platform=self.name,
-                        company=default_company or "Entreprise",
-                        title=job_title[:120],
-                        url=full_url,
-                        description=text,
-                        location="",
-                        raw_payload={"scraped_text": text},
-                    )
+                raw_lines = [
+                    line.strip()
+                    for line in (raw_content or "").split("\n")
+                    if line.strip()
+                ]
+                job_title = (raw_lines[0] if raw_lines else text)[:120]
+                if is_excluded_title(job_title):
+                    continue
+
+                candidates.append(
+                    (default_company, job_title, full_url, text)
                 )
-                found_count += 1
+
+            if candidates:
+                detail_page = await page.context.new_page()
+                detail_page.set_default_timeout(self.timeout_seconds * 1000)
+                try:
+                    for company, job_title, full_url, card_text in candidates:
+                        if (
+                            len(card_text) < MIN_DOM_DESCRIPTION_CHARS
+                            and full_url != page.url
+                        ):
+                            enriched = await self._fetch_detail_page(
+                                detail_page=detail_page,
+                                offer_url=full_url,
+                                fallback_company=company,
+                                fallback_title=job_title,
+                                fallback_text=card_text,
+                            )
+                            if not is_excluded_title(enriched.title):
+                                listings.append(enriched)
+                        else:
+                            listings.append(
+                                RawJobListing(
+                                    platform=self.name,
+                                    company=company,
+                                    title=job_title,
+                                    url=full_url,
+                                    description=card_text,
+                                    location="",
+                                    raw_payload={
+                                        "scraped_text": card_text,
+                                        "is_easy_apply": False,
+                                    },
+                                )
+                            )
+                finally:
+                    await detail_page.close()
 
         except Exception as err:
             print(f"⚠️ [GenericScraper] DOM extraction error: {err}")

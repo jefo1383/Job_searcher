@@ -7,6 +7,7 @@ from scrapers.france_travail import FranceTravailScraper
 from scrapers.hellowork import HelloWorkScraper
 from scrapers.indeed import IndeedScraper
 from scrapers.models import RawJobListing
+from scrapers.thales import ThalesScraper
 from scrapers.wttj import WTTJScraper
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "IndeedScraper",
     "RawJobListing",
     "ScraperEngine",
+    "ThalesScraper",
     "WTTJScraper",
 ]
