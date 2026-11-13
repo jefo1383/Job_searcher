@@ -27,3 +27,6 @@ data/
 # Playwright & Chrome profiles
 .playwright/
 chrome_user_data/
+
+# Generated Application Documents
+Applications/

@@ -3,13 +3,19 @@
 import argparse
 import asyncio
 from collections.abc import Sequence
+from pathlib import Path
 import sys
 from typing import Any
 
 from config.criteria import SearchCriteria, parse_search_criteria_file
 from config.settings import Settings, get_settings
 from core.analyzer import JobAnalyzer
-from core.generator import JobGenerator
+from core.generator import (
+    JobGenerator,
+    TailoredApplication,
+    export_application_markdown,
+    sanitize_filename,
+)
 from core.profile_builder import ProfileBuilder
 from db.database import JobDatabase, is_anonymous_company
 from db.models import JobStatus
@@ -98,6 +104,7 @@ class JobHunterOrchestrator:
             chat_id=self.settings.telegram_chat_id,
             profile_builder=self.profile_builder,
             indeed_callback=self._telegram_indeed_runner,
+            generator=self.generator,
         )
 
         # 5. Moteur de scraping multi-sources (Job boards + Portails ATS cibles)
@@ -265,16 +272,160 @@ class JobHunterOrchestrator:
                 if eval_res.contract_type:
                     job.contract_type = eval_res.contract_type.strip()
 
+                payload = dict(job.raw_payload or {})
+                payload["evaluation"] = {
+                    "score": eval_res.score,
+                    "reasoning": eval_res.reasoning,
+                    "key_matches": eval_res.key_matches,
+                    "missing_skills": eval_res.missing_skills,
+                }
+
                 if is_qualified:
-                    # Génération du pitch ciblé et de la lettre pour Telegram/ATS
-                    app_doc = await self.generator.generate_application(
-                        title=job.title,
+                    # Vérification si une lettre existe déjà (en base ou sur disque)
+                    folder_name = f"{sanitize_filename(job.company)}_{job.id}"
+                    app_file = (
+                        Path("Applications") / folder_name / "lettre_motivation.md"
+                    )
+                    existing_app = payload.get("application")
+
+                    has_payload_letter = (
+                        isinstance(existing_app, dict)
+                        and bool(existing_app.get("full_cover_letter"))
+                    )
+
+                    app_doc: TailoredApplication | None = None
+                    if has_payload_letter and isinstance(existing_app, dict):
+                        print(
+                            f"  📄 [Application] Lettre existante conservée "
+                            f"en base pour #{job.id} ({job.company})."
+                        )
+                        app_doc = TailoredApplication(
+                            language=str(existing_app.get("language") or "fr"),
+                            subject_line=str(
+                                existing_app.get("subject_line")
+                                or f"Candidature - {job.title}"
+                            ),
+                            quick_pitch=str(
+                                existing_app.get("quick_pitch") or ""
+                            ),
+                            full_cover_letter=str(
+                                existing_app["full_cover_letter"]
+                            ),
+                        )
+                    elif app_file.exists():
+                        print(
+                            f"  📄 [Application] Lettre existante réutilisée "
+                            f"depuis {app_file} pour #{job.id}."
+                        )
+                        disk_text = app_file.read_text(encoding="utf-8")
+                        extracted_pitch = ""
+                        extracted_letter = ""
+                        if "## 📌 Pitch d'accroche" in disk_text:
+                            p_part = disk_text.split(
+                                "## 📌 Pitch d'accroche", 1
+                            )[1]
+                            extracted_pitch = p_part.split("---", 1)[0].strip()
+                        if "## 📄 Lettre de motivation personnalisée" in disk_text:
+                            l_part = disk_text.split(
+                                "## 📄 Lettre de motivation personnalisée", 1
+                            )[1]
+                            extracted_letter = l_part.split("---", 1)[0].strip()
+
+                        app_doc = TailoredApplication(
+                            language="fr",
+                            subject_line=f"Candidature - {job.title}",
+                            quick_pitch=extracted_pitch or "Candidature ciblée",
+                            full_cover_letter=extracted_letter or disk_text,
+                        )
+                    else:
+                        # Vérification d'un dossier pour la même entreprise et titre
+                        company_slug = sanitize_filename(job.company)
+                        app_root = Path("Applications")
+                        if app_root.exists() and company_slug:
+                            for cand_dir in app_root.glob(f"{company_slug}_*"):
+                                cand_md = cand_dir / "lettre_motivation.md"
+                                if cand_md.exists():
+                                    try:
+                                        cand_text = cand_md.read_text(
+                                            encoding="utf-8"
+                                        )
+                                        if job.title.lower() in cand_text.lower():
+                                            print(
+                                                f"  🔗 [Application] Lettre "
+                                                f"similaire réutilisée depuis "
+                                                f"{cand_md} pour #{job.id}."
+                                            )
+                                            p_m = ""
+                                            l_m = ""
+                                            if "## 📌 Pitch d'accroche" in cand_text:
+                                                p_sub = cand_text.split(
+                                                    "## 📌 Pitch d'accroche", 1
+                                                )[1]
+                                                p_m = p_sub.split("---", 1)[0].strip()
+                                            letter_marker = (
+                                                "## 📄 Lettre de motivation "
+                                                "personnalisée"
+                                            )
+                                            if letter_marker in cand_text:
+                                                l_sub = cand_text.split(
+                                                    letter_marker, 1
+                                                )[1]
+                                                l_m = l_sub.split(
+                                                    "---", 1
+                                                )[0].strip()
+                                            app_doc = TailoredApplication(
+                                                language="fr",
+                                                subject_line=(
+                                                    f"Candidature - {job.title}"
+                                                ),
+                                                quick_pitch=(
+                                                    p_m or "Candidature ciblée"
+                                                ),
+                                                full_cover_letter=(
+                                                    l_m or cand_text
+                                                ),
+                                            )
+                                            break
+                                    except Exception:
+                                        pass
+
+                    # Si aucune lettre existante n'a été trouvée, génération Gemini
+                    if app_doc is None:
+                        print(
+                            f"  ✍️ [Application] Génération d'une nouvelle "
+                            f"lettre pour #{job.id} ({job.company})..."
+                        )
+                        app_doc = await self.generator.generate_application(
+                            title=job.title,
+                            company=job.company,
+                            description=job.description,
+                            key_matches=eval_res.key_matches,
+                            missing_skills=eval_res.missing_skills,
+                            platform=job.platform,
+                        )
+
+                    # Export Markdown persistant dans Applications/ (sans écraser)
+                    export_application_markdown(
+                        job_id=job.id,
                         company=job.company,
-                        description=job.description,
+                        title=job.title,
+                        url=job.url,
+                        score=eval_res.score,
+                        contract_type=job.contract_type,
+                        application=app_doc,
                         key_matches=eval_res.key_matches,
                         missing_skills=eval_res.missing_skills,
-                        platform=job.platform,
+                        reasoning=eval_res.reasoning,
+                        overwrite=False,
                     )
+
+                    payload["application"] = {
+                        "language": app_doc.language,
+                        "subject_line": app_doc.subject_line,
+                        "quick_pitch": app_doc.quick_pitch,
+                        "full_cover_letter": app_doc.full_cover_letter,
+                    }
+                    job.raw_payload = payload
 
                     # Mise à jour du statut, de l'entreprise et du contrat en base
                     await self.db.update_job_evaluation(
@@ -283,6 +434,7 @@ class JobHunterOrchestrator:
                         status=JobStatus.PENDING_REVIEW,
                         company=job.company,
                         contract_type=job.contract_type,
+                        raw_payload=payload,
                     )
 
                     # Verrou atomique pour garantir une notification Telegram unique
@@ -305,6 +457,7 @@ class JobHunterOrchestrator:
                     qualified_count += 1
                 else:
                     # Offre rejetée (note insuffisante ou critères éliminatoires)
+                    job.raw_payload = payload
                     await self.db.update_job_evaluation(
                         job_id=job.id,
                         score=eval_res.score,
@@ -316,6 +469,7 @@ class JobHunterOrchestrator:
                             else None
                         ),
                         contract_type=job.contract_type,
+                        raw_payload=payload,
                     )
                     print(
                         f"  ❌ Rejetée ({eval_res.score}/100) : "
@@ -403,6 +557,7 @@ class JobHunterOrchestrator:
                 model_name=self.settings.gemini_model,
                 profile_path=self.settings.candidate_profile_path,
             )
+            self.bot.generator = self.generator
 
         # 2. Initialisation de la persistance SQLite
         await self.db.init_db()

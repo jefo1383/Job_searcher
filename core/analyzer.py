@@ -7,6 +7,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from config.criteria import parse_search_criteria_file
 from config.settings import get_settings
 
 
@@ -68,6 +69,7 @@ class JobAnalyzer:
         api_key: str | None = None,
         model_name: str | None = None,
         profile_path: Path | None = None,
+        allowed_contracts: list[str] | None = None,
     ) -> None:
         """Initialize the analyzer with settings and candidate profile.
 
@@ -75,6 +77,7 @@ class JobAnalyzer:
             api_key: Google AI Studio API key (defaults to settings value).
             model_name: Gemini model name (defaults to settings value).
             profile_path: Path to candidate profile Markdown file.
+            allowed_contracts: Optional list of acceptable contract types.
 
         Raises:
             FileNotFoundError: If the profile file does not exist.
@@ -97,6 +100,28 @@ class JobAnalyzer:
         # Chargement du profil candidat en mémoire
         self.profile_content = target_profile_path.read_text(encoding="utf-8")
 
+        # Configuration des types de contrats autorisés (par défaut depuis critères)
+        if allowed_contracts is not None:
+            self.allowed_contracts = [
+                c.strip().lower() for c in allowed_contracts if c.strip()
+            ]
+        else:
+            try:
+                criteria = parse_search_criteria_file(
+                    settings.search_criteria_path
+                )
+                self.allowed_contracts = [
+                    c.strip().lower() for c in criteria.contracts if c.strip()
+                ]
+            except Exception:
+                self.allowed_contracts = [
+                    "alternance",
+                    "stage",
+                    "cdi",
+                    "cdd",
+                    "interim",
+                ]
+
         # Initialisation du client Google GenAI
         self.client = genai.Client(api_key=self._api_key or "DUMMY_KEY")
 
@@ -106,6 +131,12 @@ class JobAnalyzer:
         Returns:
             str: System instruction text.
         """
+        allowed_str = (
+            ", ".join(c.capitalize() for c in self.allowed_contracts)
+            if self.allowed_contracts
+            else "Alternance, Stage, CDI, CDD, Intérim"
+        )
+
         return (
             "You are an expert technical recruiter and automated job matching "
             "evaluator. Your objective is to assess the alignment between a "
@@ -116,7 +147,7 @@ class JobAnalyzer:
             "EVALUATION INSTRUCTIONS:\n"
             "1. Strictly enforce DEALBREAKERS:\n"
             "   - If the job is located on-site outside Bouches-du-Rhône (13) "
-            "or in a department 13 city NOT listed in target hubs AND > 25 km "
+            "or in a department 13 city NOT listed in target hubs AND > 30 km "
             "from Allauch (13190) without full remote option -> is_match = "
             "False, score <= 30.\n"
             "   - If the role is predominantly Web Frontend / CMS / UI -> "
@@ -124,6 +155,13 @@ class JobAnalyzer:
             "   - If the job requires a Senior, 'confirmé', or 'expérimenté' "
             "profile, or >= 3 years of experience (e.g., '3 à 4 ans', "
             "'3+ ans', '> 3 years') -> is_match = False, score <= 35.\n"
+            f"   - If the job contract type is NOT in the allowed list "
+            f"({allowed_str}) (e.g., Freelance, Indépendant, "
+            "Portage salarial, Prestation externe) -> is_match = False, "
+            "score <= 25.\n"
+            "   - If the job description is a stub, placeholder, or too brief "
+            "(< 300 characters of actual mission and stack) -> is_match = False, "
+            "score <= 25, with reasoning stating 'Description trop sommaire'.\n"
             "   - If > 50% of the primary required technologies are missing -> "
             "is_match = False, score <= 40.\n"
             "2. Score calculation (0 to 100):\n"
@@ -258,6 +296,24 @@ class JobAnalyzer:
         Returns:
             tuple[JobAnalysisResult, bool]: Result and qualification boolean.
         """
+        # 1. Règle éliminatoire stricte : description tronquée (< 300 caractères)
+        clean_desc = description.strip()
+        if len(clean_desc) < 300:
+            stub_result = JobAnalysisResult(
+                score=25,
+                is_match=False,
+                key_matches=[],
+                missing_skills=["Description détaillée manquante"],
+                reasoning=(
+                    "Description trop sommaire / incomplète (< 300 caractères) : "
+                    "impossible de vérifier les missions, le niveau d'expérience "
+                    "et les prérequis techniques."
+                ),
+                company=company,
+                contract_type=None,
+            )
+            return stub_result, False
+
         result = await self.analyze_job(
             title=title,
             company=company,
@@ -265,10 +321,38 @@ class JobAnalyzer:
             platform=platform,
         )
 
-        # Vérification du score et de l'adéquation globale
+        # 2. Règle éliminatoire stricte : type de contrat non autorisé (ex: Freelance)
+        detected_ct = (result.contract_type or "").strip().lower()
+        title_lower = title.lower()
+        is_freelance = any(
+            tok in detected_ct or tok in title_lower
+            for tok in ("freelance", "independant", "indépendant", "portage")
+        )
+        has_invalid_contract = False
+        if is_freelance:
+            has_invalid_contract = True
+        elif detected_ct and self.allowed_contracts:
+            has_invalid_contract = not any(
+                allowed in detected_ct for allowed in self.allowed_contracts
+            )
+
+        if has_invalid_contract:
+            allowed_fmt = ", ".join(
+                c.capitalize() for c in self.allowed_contracts
+            )
+            result.is_match = False
+            result.score = min(result.score, 25)
+            ct_label = result.contract_type or "Freelance"
+            result.reasoning = (
+                f"Type de contrat non souhaité ({ct_label}) : "
+                f"seuls {allowed_fmt} sont autorisés."
+            )
+            return result, False
+
+        # 3. Vérification du score et de l'adéquation globale
         is_qualified = result.is_match and result.score >= score_threshold
 
-        # Contrôle du ratio de compétences manquantes (ex: max 50%)
+        # 4. Contrôle du ratio de compétences manquantes (ex: max 50%)
         total_skills = len(result.key_matches) + len(result.missing_skills)
         if total_skills > 0:
             missing_ratio = (len(result.missing_skills) / total_skills) * 100

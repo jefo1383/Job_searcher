@@ -1,13 +1,119 @@
 """Application document and pitch generator module using Google GenAI SDK."""
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any
+import unicodedata
+
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
+
+
+def sanitize_filename(name: str) -> str:
+    """Sanitize string for safe directory and file names.
+
+    Args:
+        name: Raw identifier string.
+
+    Returns:
+        str: Lowercase alphanumeric string with underscores.
+    """
+    decomposed = unicodedata.normalize("NFKD", name)
+    cleaned = "".join(c for c in decomposed if not unicodedata.combining(c))
+    cleaned = re.sub(r"[^\w\s-]", "", cleaned).strip().lower()
+    return re.sub(r"[\s-]+", "_", cleaned)
+
+
+def export_application_markdown(
+    job_id: int,
+    company: str,
+    title: str,
+    url: str,
+    score: int | None,
+    contract_type: str | None,
+    application: "TailoredApplication",
+    key_matches: list[str] | None = None,
+    missing_skills: list[str] | None = None,
+    reasoning: str | None = None,
+    base_dir: Path | str = "Applications",
+    overwrite: bool = False,
+) -> Path:
+    """Export tailored application document, pitch, and metadata to Markdown.
+
+    Args:
+        job_id: SQLite primary key of the offer.
+        company: Employing organization name.
+        title: Position or role title.
+        url: Original job offer URL.
+        score: Relevance match score (0-100).
+        contract_type: Extracted contract category.
+        application: Generated application package with pitch and cover letter.
+        key_matches: List of confirmed skill matches.
+        missing_skills: List of potential skill compromises.
+        reasoning: Gemini evaluation rationale.
+        base_dir: Root directory for exported applications (default: 'Applications').
+        overwrite: Whether to overwrite an existing lettre_motivation.md file.
+
+    Returns:
+        Path: Filesystem path to the written lettre_motivation.md file.
+    """
+    root = Path(base_dir)
+    safe_comp = sanitize_filename(company) or "entreprise"
+    folder_name = f"{safe_comp}_{job_id}"
+    app_folder = root / folder_name
+    app_folder.mkdir(parents=True, exist_ok=True)
+
+    file_path = app_folder / "lettre_motivation.md"
+    if file_path.exists() and not overwrite:
+        return file_path
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    score_str = f"{score}/100" if score is not None else "Non noté"
+    contract_str = contract_type or "Non précisé"
+
+    matches_md = (
+        "\n".join(f"- {m}" for m in key_matches)
+        if key_matches
+        else "- Non spécifié"
+    )
+    missing_md = (
+        "\n".join(f"- {m}" for m in missing_skills)
+        if missing_skills
+        else "- Aucune lacune majeure détectée"
+    )
+    reasoning_md = reasoning or "Non spécifiée."
+
+    content = (
+        f"# Candidature — {company} — {title}\n\n"
+        f"- **Identifiant de l'offre :** #{job_id}\n"
+        f"- **Score Gemini :** {score_str}\n"
+        f"- **Type de contrat :** {contract_str}\n"
+        f"- **URL de l'offre :** {url}\n"
+        f"- **Date de génération :** {now_iso}\n"
+        f"- **Langue détectée :** {application.language.upper()}\n"
+        f"- **Objet suggéré :** {application.subject_line}\n\n"
+        f"---\n\n"
+        f"## 📌 Pitch d'accroche (Accroche rapide)\n\n"
+        f"{application.quick_pitch}\n\n"
+        f"---\n\n"
+        f"## 📄 Lettre de motivation personnalisée\n\n"
+        f"{application.full_cover_letter}\n\n"
+        f"---\n\n"
+        f"## 🔍 Synthèse d'évaluation\n\n"
+        f"*{reasoning_md}*\n\n"
+        f"### Points forts retenus\n"
+        f"{matches_md}\n\n"
+        f"### Compétences à développer / compromis\n"
+        f"{missing_md}\n"
+    )
+
+    file_path.write_text(content, encoding="utf-8")
+    return file_path
 
 
 class TailoredApplication(BaseModel):

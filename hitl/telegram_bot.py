@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 import html
+from pathlib import Path
 import re
 import unicodedata
 from typing import Any
@@ -25,6 +26,12 @@ from telegram.ext import (
 from automation.browser_runner import BrowserRunner, CandidateDetails
 from config.settings import get_settings
 from core.analyzer import JobAnalysisResult
+from core.generator import (
+    JobGenerator,
+    TailoredApplication,
+    export_application_markdown,
+    sanitize_filename,
+)
 from core.profile_builder import ProfileBuilder
 from db.database import JobDatabase
 from db.models import JobRecord, JobStatus
@@ -131,6 +138,7 @@ class JobHunterBot:
         profile_builder: ProfileBuilder | None = None,
         indeed_callback: IndeedRunnerCallback | None = None,
         lba_scraper: LaBonneAlternanceScraper | None = None,
+        generator: JobGenerator | None = None,
     ) -> None:
         """Initialize the bot with settings and command handlers.
 
@@ -142,6 +150,7 @@ class JobHunterBot:
             profile_builder: Profile generator for resume sync.
             indeed_callback: Optional interactive Indeed orchestrator hook.
             lba_scraper: Optional La bonne alternance scraper for /spontanees.
+            generator: Tailored cover letter and pitch generator.
 
         Raises:
             ValueError: If bot_token is empty or invalid.
@@ -167,6 +176,7 @@ class JobHunterBot:
         self.indeed_callback = indeed_callback
         self.lba_scraper = lba_scraper or LaBonneAlternanceScraper()
         self.candidate_details = CandidateDetails()
+        self.generator = generator or JobGenerator()
 
         # Coordination d'une session Indeed interactive lancée via /indeed
         self._indeed_lock = asyncio.Lock()
@@ -551,9 +561,15 @@ class JobHunterBot:
             ],
             [
                 InlineKeyboardButton(
+                    "📄 Lettre de motivation",
+                    callback_data=f"letter:{job_id}",
+                ),
+                InlineKeyboardButton(
                     "↩️ Remettre en attente",
                     callback_data=f"reopen:{job_id}",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     "❌ Ignorer",
                     callback_data=f"reject:{job_id}",
@@ -588,15 +604,48 @@ class JobHunterBot:
         safe_platform = html.escape(job.platform.upper())
         safe_url = html.escape(job.url)
 
-        return "\n".join(
-            [
-                f"<b>{html.escape(header_title)} ({score_txt})</b>\n",
-                f"🏢 <b>Entreprise :</b> {safe_company}",
-                f"💼 <b>Poste :</b> {safe_title}",
-                f"📑 <b>Contrat :</b> {html.escape(contract_label)}",
-                f"🌐 <b>Source :</b> <a href='{safe_url}'>{safe_platform}</a>",
-            ]
-        )
+        message_parts = [
+            f"<b>{html.escape(header_title)} ({score_txt})</b>\n",
+            f"🏢 <b>Entreprise :</b> {safe_company}",
+            f"💼 <b>Poste :</b> {safe_title}",
+            f"📑 <b>Contrat :</b> {html.escape(contract_label)}",
+            f"🌐 <b>Source :</b> <a href='{safe_url}'>{safe_platform}</a>",
+        ]
+
+        # Récupération persistante de l'évaluation et du pitch
+        eval_data: dict[str, Any] | None = None
+        app_data: dict[str, Any] | None = None
+        if isinstance(job.raw_payload, dict):
+            raw_eval = job.raw_payload.get("evaluation")
+            if isinstance(raw_eval, dict):
+                eval_data = raw_eval
+            raw_app = job.raw_payload.get("application")
+            if isinstance(raw_app, dict):
+                app_data = raw_app
+
+        if eval_data:
+            key_matches = eval_data.get("key_matches")
+            if isinstance(key_matches, list) and key_matches:
+                matches_txt = ", ".join(
+                    html.escape(str(m)) for m in key_matches[:4]
+                )
+                message_parts.append(f"✅ <b>Points forts :</b> {matches_txt}")
+            reasoning = eval_data.get("reasoning")
+            if isinstance(reasoning, str) and reasoning.strip():
+                safe_reasoning = html.escape(reasoning.strip())
+                message_parts.append(
+                    f"💡 <b>Synthèse :</b> <i>{safe_reasoning}</i>"
+                )
+
+        if app_data:
+            quick_pitch = app_data.get("quick_pitch")
+            if isinstance(quick_pitch, str) and quick_pitch.strip():
+                safe_pitch = html.escape(quick_pitch.strip())
+                message_parts.append(
+                    f"\n📌 <b>Pitch suggéré :</b>\n<i>{safe_pitch}</i>"
+                )
+
+        return "\n".join(message_parts)
 
     async def _cmd_accepted(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -654,7 +703,7 @@ class JobHunterBot:
             return
 
         # Nombre maximal d'offres agrégées dans le menu (paramètre réglable)
-        pending_fetch_limit = 50
+        pending_fetch_limit = 100
         pending_jobs = await self.db.get_jobs_by_status(
             JobStatus.PENDING_REVIEW, limit=pending_fetch_limit
         )
@@ -678,7 +727,7 @@ class JobHunterBot:
             return
 
         # Paramètres réglables : profondeur d'agrégation et cartes par clic
-        pending_fetch_limit = 50
+        pending_fetch_limit = 100
         cards_display_limit = 10
 
         pending_jobs = await self.db.get_jobs_by_status(
@@ -697,9 +746,17 @@ class JobHunterBot:
                 pass
             return
 
-        cat_key = query.data.split(":", 1)[1]
+        parts = query.data.split(":")
+        cat_key = parts[1]
+        offset = 0
+        if len(parts) > 2:
+            try:
+                offset = int(parts[2])
+            except ValueError:
+                offset = 0
+
         if cat_key == "all":
-            filtered_jobs = pending_jobs
+            filtered_jobs = list(pending_jobs)
             cat_label = "📋 Toutes les offres"
         else:
             filtered_jobs = [
@@ -709,16 +766,53 @@ class JobHunterBot:
             ]
             cat_label = CONTRACT_LABELS.get(cat_key, cat_key.upper())
 
-        back_markup = InlineKeyboardMarkup(
+        # Tri strict par score décroissant (les scores les plus élevés en premier)
+        filtered_jobs.sort(
+            key=lambda j: (j.score or 0, j.id or 0),
+            reverse=True,
+        )
+
+        total_count = len(filtered_jobs)
+        safe_offset = (
+            max(0, min(offset, max(0, total_count - 1)))
+            if total_count > 0
+            else 0
+        )
+        shown_jobs = filtered_jobs[
+            safe_offset : safe_offset + cards_display_limit
+        ]
+
+        # Boutons de navigation (précédentes / suivantes / menu)
+        nav_buttons: list[InlineKeyboardButton] = []
+        if safe_offset > 0:
+            prev_offset = max(0, safe_offset - cards_display_limit)
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    "⬅️ Précédentes",
+                    callback_data=f"pending_cat:{cat_key}:{prev_offset}",
+                )
+            )
+        if safe_offset + len(shown_jobs) < total_count:
+            next_offset = safe_offset + len(shown_jobs)
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    "➡️ 10 suivantes",
+                    callback_data=f"pending_cat:{cat_key}:{next_offset}",
+                )
+            )
+
+        header_markup_rows: list[list[InlineKeyboardButton]] = []
+        if nav_buttons:
+            header_markup_rows.append(nav_buttons)
+        header_markup_rows.append(
             [
-                [
-                    InlineKeyboardButton(
-                        "🔙 Autres catégories",
-                        callback_data="pending_menu",
-                    )
-                ]
+                InlineKeyboardButton(
+                    "🔙 Autres catégories",
+                    callback_data="pending_menu",
+                )
             ]
         )
+        header_markup = InlineKeyboardMarkup(header_markup_rows)
 
         if not filtered_jobs:
             try:
@@ -728,22 +822,31 @@ class JobHunterBot:
                         f"<b>{html.escape(cat_label)}</b>."
                     ),
                     parse_mode=ParseMode.HTML,
-                    reply_markup=back_markup,
+                    reply_markup=header_markup,
                 )
             except Exception:
                 pass
             return
 
-        shown_jobs = filtered_jobs[:cards_display_limit]
+        score_range = ""
+        if shown_jobs:
+            max_s = shown_jobs[0].score
+            min_s = shown_jobs[-1].score
+            if max_s is not None and min_s is not None:
+                score_range = f" (scores {max_s} à {min_s})"
+
+        start_num = safe_offset + 1
+        end_num = safe_offset + len(shown_jobs)
         try:
             await query.edit_message_text(
                 text=(
                     f"📂 <b>{html.escape(cat_label)}</b> — "
-                    f"{len(shown_jobs)}/{len(filtered_jobs)} "
-                    "offre(s) affichée(s) :"
+                    f"Offres {start_num} à {end_num} sur {total_count}"
+                    f"{score_range} :\n"
+                    "<i>(triées par score décroissant)</i>"
                 ),
                 parse_mode=ParseMode.HTML,
-                reply_markup=back_markup,
+                reply_markup=header_markup,
             )
         except Exception:
             pass
@@ -764,6 +867,36 @@ class JobHunterBot:
                 parse_mode=ParseMode.HTML,
                 reply_markup=markup,
                 disable_web_page_preview=True,
+            )
+
+        # Envoi d'un bloc de navigation en bas de liste pour enchaîner facilement
+        if safe_offset + len(shown_jobs) < total_count:
+            next_offset = safe_offset + len(shown_jobs)
+            remaining = total_count - next_offset
+            footer_markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            f"➡️ 10 offres suivantes ({remaining} restantes)",
+                            callback_data=f"pending_cat:{cat_key}:{next_offset}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🔙 Autres catégories",
+                            callback_data="pending_menu",
+                        )
+                    ],
+                ]
+            )
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"👇 <b>Suite disponible :</b> encore {remaining} offre(s) "
+                    f"dans <b>{html.escape(cat_label)}</b>"
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=footer_markup,
             )
 
     def _build_alert_markup(
@@ -797,6 +930,10 @@ class JobHunterBot:
                 ],
                 [
                     InlineKeyboardButton(
+                        "📄 Lettre de motivation",
+                        callback_data=f"letter:{job_id}",
+                    ),
+                    InlineKeyboardButton(
                         "❌ Ignorer",
                         callback_data=f"reject:{job_id}",
                     ),
@@ -819,6 +956,10 @@ class JobHunterBot:
             keyboard = [
                 action_row,
                 [
+                    InlineKeyboardButton(
+                        "📄 Lettre de motivation",
+                        callback_data=f"letter:{job_id}",
+                    ),
                     InlineKeyboardButton(
                         "❌ Ignorer",
                         callback_data=f"reject:{job_id}",
@@ -1222,6 +1363,168 @@ class JobHunterBot:
         except Exception:
             return False
 
+    async def _ensure_cover_letter(
+        self,
+        job: JobRecord,
+    ) -> tuple[str, Path]:
+        """Retrieve or generate cover letter and ensure Markdown export exists.
+
+        Args:
+            job: Persisted job record.
+
+        Returns:
+            tuple[str, Path]: The cover letter text and local markdown file path.
+        """
+        cover_letter: str | None = None
+        eval_data: dict[str, Any] = {}
+        app_data: dict[str, Any] = {}
+
+        if isinstance(job.raw_payload, dict):
+            raw_app = job.raw_payload.get("application")
+            if isinstance(raw_app, dict):
+                app_data = raw_app
+                cl = app_data.get("full_cover_letter")
+                if isinstance(cl, str) and cl.strip():
+                    cover_letter = cl.strip()
+            raw_eval = job.raw_payload.get("evaluation")
+            if isinstance(raw_eval, dict):
+                eval_data = raw_eval
+
+        folder_name = (
+            f"{sanitize_filename(job.company)}_{job.id or 'unknown'}"
+        )
+        app_dir = Path("Applications") / folder_name
+        md_file = app_dir / "lettre_motivation.md"
+
+        if cover_letter:
+            if not md_file.exists():
+                app_doc = TailoredApplication(
+                    language=str(app_data.get("language") or "fr"),
+                    subject_line=str(
+                        app_data.get("subject_line")
+                        or f"Candidature - {job.title}"
+                    ),
+                    quick_pitch=str(app_data.get("quick_pitch") or ""),
+                    full_cover_letter=cover_letter,
+                )
+                export_application_markdown(
+                    job_id=job.id or 0,
+                    company=job.company,
+                    title=job.title,
+                    url=job.url,
+                    score=job.score,
+                    contract_type=job.contract_type,
+                    application=app_doc,
+                    key_matches=eval_data.get("key_matches"),
+                    missing_skills=eval_data.get("missing_skills"),
+                    reasoning=eval_data.get("reasoning"),
+                )
+            return cover_letter, md_file
+
+        # Si pas encore généré dans raw_payload, génération à la volée
+        app_doc = await self.generator.generate_application(
+            title=job.title,
+            company=job.company,
+            description=job.description,
+            key_matches=eval_data.get("key_matches"),
+            missing_skills=eval_data.get("missing_skills"),
+            platform=job.platform,
+        )
+        cover_letter = app_doc.full_cover_letter
+        md_file = export_application_markdown(
+            job_id=job.id or 0,
+            company=job.company,
+            title=job.title,
+            url=job.url,
+            score=job.score,
+            contract_type=job.contract_type,
+            application=app_doc,
+            key_matches=eval_data.get("key_matches"),
+            missing_skills=eval_data.get("missing_skills"),
+            reasoning=eval_data.get("reasoning"),
+        )
+
+        payload = dict(job.raw_payload or {})
+        payload["application"] = {
+            "language": app_doc.language,
+            "subject_line": app_doc.subject_line,
+            "quick_pitch": app_doc.quick_pitch,
+            "full_cover_letter": app_doc.full_cover_letter,
+        }
+        if job.id is not None:
+            await self.db.update_job_payload(job.id, payload)
+            job.raw_payload = payload
+
+        return cover_letter, md_file
+
+    async def _handle_letter_request(
+        self,
+        query: CallbackQuery,
+        job: JobRecord,
+        chat_id: int,
+    ) -> None:
+        """Handle request to view and export the tailored cover letter.
+
+        Args:
+            query: Telegram callback query from inline keyboard.
+            job: Target job record.
+            chat_id: Telegram chat ID for delivery.
+        """
+        if job.id is None:
+            return
+
+        try:
+            await query.answer("📄 Préparation de la lettre de motivation...")
+        except Exception:
+            pass
+
+        cover_letter, md_path = await self._ensure_cover_letter(job)
+        safe_company = html.escape(job.company)
+        safe_title = html.escape(job.title)
+        cwd = Path.cwd()
+        rel_path = (
+            md_path.relative_to(cwd)
+            if md_path.is_absolute() and md_path.is_relative_to(cwd)
+            else md_path
+        )
+
+        header_lines = [
+            f"📄 <b>Lettre de motivation — {safe_company}</b>",
+            f"💼 <i>Poste : {safe_title}</i>",
+            f"💾 <i>Fichier : <code>{html.escape(str(rel_path))}</code></i>\n",
+        ]
+        header_text = "\n".join(header_lines)
+
+        max_pre_chars = 3800 - len(header_text)
+        if len(cover_letter) <= max_pre_chars:
+            full_msg = (
+                f"{header_text}<pre>{html.escape(cover_letter)}</pre>"
+            )
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=full_msg,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        else:
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=header_text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            chunks = [
+                cover_letter[i : i + 3900]
+                for i in range(0, len(cover_letter), 3900)
+            ]
+            for chunk in chunks:
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"<pre>{html.escape(chunk)}</pre>",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+
     async def _handle_action_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1277,6 +1580,15 @@ class JobHunterBot:
         if not job:
             return
 
+        # Consultation et export de la lettre de motivation
+        if action == "letter":
+            await self._handle_letter_request(
+                query=query,
+                job=job,
+                chat_id=update.effective_chat.id,
+            )
+            return
+
         # Application de la transition d'état dans SQLite
         status_label = ""
         next_markup: InlineKeyboardMarkup | None = None
@@ -1297,10 +1609,12 @@ class JobHunterBot:
                 offer_url=target_url,
             )
 
+            cover_letter, _ = await self._ensure_cover_letter(job)
             asyncio.create_task(
                 self.browser_runner.open_and_prefill_job(
                     url=target_url,
                     candidate=self.candidate_details,
+                    cover_letter=cover_letter,
                 )
             )
         elif action == "reopen":
@@ -1379,9 +1693,11 @@ class JobHunterBot:
             job: Target job record.
             chat_id: Telegram chat ID for delivery.
         """
+        cover_letter, _ = await self._ensure_cover_letter(job)
         result = await self.browser_runner.apply_multi_step_modal(
             url=job.url,
             candidate=self.candidate_details,
+            cover_letter=cover_letter,
             job_context=f"{job.title} chez {job.company}",
         )
 

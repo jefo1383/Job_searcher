@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+from typing import Any
 import unicodedata
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -911,12 +912,14 @@ class JobDatabase:
         self,
         status: JobStatus,
         limit: int = 50,
+        order_by: str = "COALESCE(score, 0) DESC, id DESC",
     ) -> list[JobRecord]:
         """Fetch job records filtered by processing lifecycle status.
 
         Args:
             status: Target JobStatus enum value.
             limit: Maximum count of rows to return.
+            order_by: SQL ORDER BY expression (default: score and id DESC).
 
         Returns:
             list[JobRecord]: List of matching job records.
@@ -924,7 +927,7 @@ class JobDatabase:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM jobs WHERE status = ? ORDER BY id ASC LIMIT ?;",
+                f"SELECT * FROM jobs WHERE status = ? ORDER BY {order_by} LIMIT ?;",
                 (status.value, limit),
             )
             rows = await cursor.fetchall()
@@ -1112,8 +1115,9 @@ class JobDatabase:
         status: JobStatus,
         company: str | None = None,
         contract_type: str | None = None,
+        raw_payload: dict[str, Any] | None = None,
     ) -> bool:
-        """Update job score, status, and optional company/contract metadata.
+        """Update job score, status, and optional company/contract/payload metadata.
 
         Args:
             job_id: SQLite primary key.
@@ -1121,6 +1125,7 @@ class JobDatabase:
             status: New status (e.g., PENDING_REVIEW or REJECTED).
             company: Optional rectified employer name.
             contract_type: Optional extracted contract type.
+            raw_payload: Optional updated dictionary with evaluation & cover letter.
 
         Returns:
             bool: True if a row was updated, False otherwise.
@@ -1135,12 +1140,43 @@ class JobDatabase:
         if contract_type:
             set_clauses.append("contract_type = ?")
             params.append(contract_type)
+        if raw_payload is not None:
+            set_clauses.append("raw_payload = ?")
+            params.append(json.dumps(raw_payload))
 
         params.append(job_id)
         query_sql = f"UPDATE jobs SET {', '.join(set_clauses)} WHERE id = ?;"
 
         async with self._connect() as db:
             cursor = await db.execute(query_sql, tuple(params))
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def update_job_payload(
+        self,
+        job_id: int,
+        raw_payload: dict[str, Any],
+    ) -> bool:
+        """Update the raw_payload JSON of an existing job record.
+
+        Args:
+            job_id: SQLite primary key.
+            raw_payload: Updated dictionary data to persist.
+
+        Returns:
+            bool: True if updated, False otherwise.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+        payload_text = json.dumps(raw_payload)
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE jobs
+                SET raw_payload = ?, updated_at = ?
+                WHERE id = ?;
+                """,
+                (payload_text, now_iso, job_id),
+            )
             await db.commit()
             return cursor.rowcount > 0
 
@@ -1371,6 +1407,24 @@ class JobDatabase:
 
                     if alt_urls:
                         payload["alternate_urls"] = alt_urls
+
+                    # Transmission des métadonnées de candidature
+                    if "application" not in payload:
+                        for idx in member_indices:
+                            dup_payload = records[idx].raw_payload or {}
+                            if "application" in dup_payload:
+                                payload["application"] = dup_payload[
+                                    "application"
+                                ]
+                                break
+                    if "evaluation" not in payload:
+                        for idx in member_indices:
+                            dup_payload = records[idx].raw_payload or {}
+                            if "evaluation" in dup_payload:
+                                payload["evaluation"] = dup_payload[
+                                    "evaluation"
+                                ]
+                                break
 
                     # Suppression d'abord des doublons pour libérer normalized_url
                     for idx in member_indices:

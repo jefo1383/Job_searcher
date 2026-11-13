@@ -281,17 +281,68 @@ class IndeedScraper(BaseScraper):
             if await snippet_loc.count() > 0:
                 snippet_txt = (await snippet_loc.inner_text()).strip()
 
-            # Clic sur la carte pour lire le panneau de description complète
+            # Clic sur la carte avec retry et attente pour lire la description complète
             full_pane_text = ""
+            desc_selectors = (
+                "#jobDescriptionText, "
+                "div.jobsearch-jobDescriptionText, "
+                "div[data-testid='jobsearch-JobComponent-description']"
+            )
+
+            # Essai 1 : Clic direct sur le titre et attente standard (3,5s)
             try:
                 await title_link.click(timeout=3000)
-                desc_pane = page.locator("#jobDescriptionText").first
+                desc_pane = page.locator(desc_selectors).first
                 await desc_pane.wait_for(state="visible", timeout=3500)
-                full_pane_text = (await desc_pane.inner_text()).strip()
+                candidate_text = (await desc_pane.inner_text()).strip()
+                if len(candidate_text) >= 200:
+                    full_pane_text = candidate_text
             except Exception:
-                full_pane_text = ""
+                pass
 
-            body_text = full_pane_text or snippet_txt or job_title
+            # Essai 2 (Retry) : scroll et attente prolongée (5s)
+            if not full_pane_text or len(full_pane_text) < 200:
+                try:
+                    await title_link.scroll_into_view_if_needed(timeout=2000)
+                    await asyncio.sleep(0.8)
+                    await title_link.click(timeout=3000)
+                    desc_pane = page.locator(desc_selectors).first
+                    await desc_pane.wait_for(state="visible", timeout=5000)
+                    candidate_text = (await desc_pane.inner_text()).strip()
+                    if len(candidate_text) >= 200:
+                        full_pane_text = candidate_text
+                except Exception:
+                    pass
+
+            # Essai 3 (Repli direct) : onglet éphémère sur /viewjob?jk=...
+            if not full_pane_text or len(full_pane_text) < 200:
+                try:
+                    temp_page = await page.context.new_page()
+                    try:
+                        await temp_page.goto(
+                            canonical_url,
+                            wait_until="domcontentloaded",
+                            timeout=8000,
+                        )
+                        direct_pane = temp_page.locator(desc_selectors).first
+                        await direct_pane.wait_for(state="visible", timeout=4000)
+                        candidate_text = (await direct_pane.inner_text()).strip()
+                        if len(candidate_text) >= 200:
+                            full_pane_text = candidate_text
+                    finally:
+                        await temp_page.close()
+                except Exception:
+                    pass
+
+            body_text = full_pane_text or snippet_txt
+            # Si aucune description réelle n'a pu être extraite après tous les retries
+            if not body_text or len(body_text.strip()) < 100:
+                print(
+                    f"⚠️ [Indeed] Description introuvable pour '{company_name}' - "
+                    f"'{job_title}' ({canonical_url}) après retries. Offre ignorée."
+                )
+                continue
+
             full_description = (
                 f"{job_title} chez {company_name}\n"
                 f"Lieu : {location_txt}\n\n"

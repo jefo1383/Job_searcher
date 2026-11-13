@@ -18,7 +18,7 @@ from config.settings import get_settings
 # API officielle Base Adresse Nationale (géocodage sans clé API)
 BAN_SEARCH_URL: str = "https://api-adresse.data.gouv.fr/search/"
 # Rayon maximal autorisé dans le département cible depuis le domicile (réglable)
-DEFAULT_MAX_DISTANCE_KM: float = 25.0
+DEFAULT_MAX_DISTANCE_KM: float = 30.0
 # Coordonnées par défaut du domicile (Allauch 13190) (réglable)
 DEFAULT_RESIDENCE_LABEL: str = "Allauch (13190), France"
 DEFAULT_RESIDENCE_COORDS: tuple[float, float] = (43.341016, 5.485377)
