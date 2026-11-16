@@ -33,7 +33,7 @@ help: ## Affiche l'aide des commandes disponibles
 
 setup: ## Prépare l'environnement virtuel uv et le navigateur Chromium
 	$(UV) sync
-	$(UV) run playwright install chromium
+	$(PYTHON) scripts/setup_browser.py
 
 install: ## Compile et installe le package PyInstaller dans INSTALL_DIR
 	@if ! $(PYTHON) -c "import PyInstaller" >/dev/null 2>&1; then \

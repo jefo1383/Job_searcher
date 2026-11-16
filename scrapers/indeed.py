@@ -2,7 +2,10 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+import html
 from pathlib import Path
+import re
+from typing import Any
 from urllib.parse import quote_plus
 
 from playwright.async_api import BrowserContext, Page, async_playwright
@@ -17,6 +20,100 @@ INDEED_BASE_SEARCH_URL: str = "https://fr.indeed.com/emplois"
 
 # Signature type pour le callback d'attente utilisateur en mode interactif
 ReadyCallback = Callable[[str], Awaitable[bool]]
+
+
+def _strip_html_tags(raw_html: str) -> str:
+    """Supprime les balises HTML et normalise les espaces.
+
+    Args:
+        raw_html: Chaîne contenant du balisage HTML.
+
+    Returns:
+        str: Texte nettoyé et décodé.
+    """
+    clean = re.sub(r"<[^>]+>", " ", raw_html)
+    clean = html.unescape(clean)
+    return " ".join(clean.split())
+
+
+def _extract_descriptions_from_json(
+    data: Any,
+    store: dict[str, str],
+    current_jk: str = "",
+) -> None:
+    """Parcourt récursivement un JSON Indeed pour extraire les descriptions.
+
+    Args:
+        data: Objet ou liste JSON à inspecter.
+        store: Dictionnaire de stockage (jk -> description).
+        current_jk: Contexte de jobkey hérité du parent.
+    """
+    if isinstance(data, dict):
+        jk = str(
+            data.get("jobkey")
+            or data.get("jobKey")
+            or data.get("jk")
+            or data.get("job_key")
+            or ""
+        )
+        if (
+            not jk
+            and isinstance(data.get("key"), str)
+            and len(data["key"]) == 16
+        ):
+            jk = data["key"]
+        jk = jk or current_jk
+
+        raw_desc = (
+            data.get("sanitizedJobDescription")
+            or data.get("jobDescriptionText")
+            or data.get("description")
+            or data.get("jobDescription")
+            or data.get("html")
+            or data.get("text")
+        )
+        if jk and isinstance(raw_desc, str) and len(raw_desc.strip()) >= 80:
+            clean = _strip_html_tags(raw_desc)
+            if len(clean) >= 80 and jk not in store:
+                store[jk] = clean
+
+        for key, val in data.items():
+            inherited_jk = jk if jk else current_jk
+            _extract_descriptions_from_json(val, store, current_jk=inherited_jk)
+
+    elif isinstance(data, list):
+        for item in data:
+            _extract_descriptions_from_json(item, store, current_jk=current_jk)
+
+
+def _extract_from_html_response(
+    html_text: str,
+    url: str,
+    store: dict[str, str],
+) -> None:
+    """Extrait le jobDescriptionText d'une réponse HTML Indeed.
+
+    Args:
+        html_text: Corps HTML de la réponse.
+        url: URL de la requête.
+        store: Dictionnaire de stockage.
+    """
+    match_jk = re.search(r"[?&]jk=([a-f0-9]+)", url)
+    if not match_jk:
+        return
+    jk = match_jk.group(1)
+    if jk in store:
+        return
+
+    match_desc = re.search(
+        r'id=["\']jobDescriptionText["\'][^>]*>(.*?)</div>',
+        html_text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if match_desc:
+        clean = _strip_html_tags(match_desc.group(1))
+        if len(clean) >= 80:
+            store[jk] = clean
 
 
 class IndeedScraper(BaseScraper):
@@ -75,6 +172,7 @@ class IndeedScraper(BaseScraper):
         self.scroll_delay_ms = scroll_delay_ms
         self.location_matcher = location_matcher or LocationMatcher()
         self.last_run_blocked: bool = False
+        self._captured_descriptions: dict[str, str] = {}
 
         # Création sécurisée du dossier de profil avec repli local si restreint
         try:
@@ -281,72 +379,103 @@ class IndeedScraper(BaseScraper):
             if await snippet_loc.count() > 0:
                 snippet_txt = (await snippet_loc.inner_text()).strip()
 
-            # Clic sur la carte avec retry et attente pour lire la description complète
-            full_pane_text = ""
+            # Neutralisation de target="_blank" sur la carte et ses liens
+            try:
+                await card.evaluate(
+                    "(el) => {"
+                    "  const a = el.querySelector('a');"
+                    "  if (a) a.removeAttribute('target');"
+                    "}"
+                )
+            except Exception:
+                pass
+
+            # Récupération immédiate si intercepté lors du chargement de page
+            full_pane_text = self._captured_descriptions.get(jk, "")
+
+            # Déclenchement du clic si non intercepté
+            if not full_pane_text:
+                try:
+                    await card.click(timeout=2500)
+                except Exception:
+                    try:
+                        await title_link.click(timeout=2500)
+                    except Exception:
+                        pass
+
+                # Attente dynamique de l'interception réseau (max 2.4s)
+                for _ in range(12):
+                    if (
+                        jk in self._captured_descriptions
+                        and len(self._captured_descriptions[jk]) >= 80
+                    ):
+                        full_pane_text = self._captured_descriptions[jk]
+                        break
+                    await asyncio.sleep(0.2)
+
+            # Repli 1 : Recherche dans le DOM (page principale)
             desc_selectors = (
                 "#jobDescriptionText, "
                 "div.jobsearch-jobDescriptionText, "
                 "div[data-testid='jobsearch-JobComponent-description']"
             )
-
-            # Essai 1 : Clic direct sur le titre et attente standard (3,5s)
-            try:
-                await title_link.click(timeout=3000)
-                desc_pane = page.locator(desc_selectors).first
-                await desc_pane.wait_for(state="visible", timeout=3500)
-                candidate_text = (await desc_pane.inner_text()).strip()
-                if len(candidate_text) >= 200:
-                    full_pane_text = candidate_text
-            except Exception:
-                pass
-
-            # Essai 2 (Retry) : scroll et attente prolongée (5s)
-            if not full_pane_text or len(full_pane_text) < 200:
+            if not full_pane_text:
                 try:
-                    await title_link.scroll_into_view_if_needed(timeout=2000)
-                    await asyncio.sleep(0.8)
-                    await title_link.click(timeout=3000)
                     desc_pane = page.locator(desc_selectors).first
-                    await desc_pane.wait_for(state="visible", timeout=5000)
-                    candidate_text = (await desc_pane.inner_text()).strip()
-                    if len(candidate_text) >= 200:
-                        full_pane_text = candidate_text
+                    if (
+                        await desc_pane.count() > 0
+                        and await desc_pane.is_visible()
+                    ):
+                        candidate_text = (await desc_pane.inner_text()).strip()
+                        if len(candidate_text) >= 80:
+                            full_pane_text = candidate_text
                 except Exception:
                     pass
 
-            # Essai 3 (Repli direct) : onglet éphémère sur /viewjob?jk=...
-            if not full_pane_text or len(full_pane_text) < 200:
+            # Repli 2 : Recherche dans l'iframe du volet latéral
+            if not full_pane_text:
                 try:
-                    temp_page = await page.context.new_page()
-                    try:
-                        await temp_page.goto(
-                            canonical_url,
-                            wait_until="domcontentloaded",
-                            timeout=8000,
-                        )
-                        direct_pane = temp_page.locator(desc_selectors).first
-                        await direct_pane.wait_for(state="visible", timeout=4000)
-                        candidate_text = (await direct_pane.inner_text()).strip()
-                        if len(candidate_text) >= 200:
+                    iframe_pane = page.frame_locator(
+                        "iframe#vjs-container-iframe, "
+                        "iframe[name*='vjs'], "
+                        "iframe[title*='job'], "
+                        "iframe[title*='Détails']"
+                    ).locator("#jobDescriptionText").first
+                    if await iframe_pane.count() > 0:
+                        candidate_text = (
+                            await iframe_pane.inner_text()
+                        ).strip()
+                        if len(candidate_text) >= 80:
                             full_pane_text = candidate_text
-                    finally:
-                        await temp_page.close()
                 except Exception:
                     pass
+
+            # Nettoyage d'éventuels popups orphelins ouverts en arrière-plan
+            if len(page.context.pages) > 1:
+                for stray in page.context.pages[1:]:
+                    try:
+                        await stray.close()
+                    except Exception:
+                        pass
 
             body_text = full_pane_text or snippet_txt
-            # Si aucune description réelle n'a pu être extraite après tous les retries
-            if not body_text or len(body_text.strip()) < 100:
+            # Seuil de sécurité assoupli à 50 caractères
+            if not body_text or len(body_text.strip()) < 50:
                 print(
                     f"⚠️ [Indeed] Description introuvable pour '{company_name}' - "
-                    f"'{job_title}' ({canonical_url}) après retries. Offre ignorée."
+                    f"'{job_title}' ({canonical_url}). Offre ignorée."
                 )
                 continue
 
+            desc_label = (
+                "Description de l'offre :"
+                if full_pane_text
+                else "Résumé succinct de l'offre (extrait Indeed) :"
+            )
             full_description = (
                 f"{job_title} chez {company_name}\n"
                 f"Lieu : {location_txt}\n\n"
-                f"Description de l'offre :\n{body_text}"
+                f"{desc_label}\n{body_text}"
             )
 
             results.append(
@@ -412,6 +541,48 @@ class IndeedScraper(BaseScraper):
                 return
 
             try:
+                self._captured_descriptions.clear()
+
+                async def _on_network_response(resp: Any) -> None:
+                    try:
+                        url = resp.url
+                        if not any(
+                            k in url
+                            for k in (
+                                "viewjob",
+                                "rpc",
+                                "graphql",
+                                "jobdesc",
+                                "basecamp",
+                            )
+                        ):
+                            return
+
+                        if resp.status >= 400:
+                            return
+
+                        content_type = resp.headers.get("content-type", "").lower()
+                        if "json" in content_type:
+                            try:
+                                data = await resp.json()
+                                _extract_descriptions_from_json(
+                                    data, self._captured_descriptions
+                                )
+                            except Exception:
+                                pass
+                        elif "html" in content_type and "viewjob" in url:
+                            try:
+                                text = await resp.text()
+                                _extract_from_html_response(
+                                    text, url, self._captured_descriptions
+                                )
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                context.on("response", _on_network_response)
+
                 page = (
                     context.pages[0]
                     if context.pages
