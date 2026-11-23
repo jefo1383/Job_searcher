@@ -12,6 +12,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
+from core.circuit_breaker import get_circuit_breaker
 
 
 def sanitize_filename(name: str) -> str:
@@ -175,7 +176,7 @@ class JobGenerator:
             else settings.gemini_api_key.get_secret_value()
         )
         self._api_key = resolved_key
-        self.model_name = model_name or settings.gemini_model
+        self.model_name = model_name or settings.gemini_generator_model
 
         target_profile_path = profile_path or settings.candidate_profile_path
         if not target_profile_path.exists():
@@ -290,10 +291,17 @@ class JobGenerator:
             system_instruction=self._build_system_instruction(),
         )
 
-        models_to_try = [self.model_name]
-        for fallback in ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]:
-            if fallback not in models_to_try:
-                models_to_try.append(fallback)
+        breaker = get_circuit_breaker()
+        raw_models = get_settings().get_gemini_model_cascade(
+            self.model_name
+        )
+        models_to_try = breaker.filter_available_models(raw_models)
+
+        if not models_to_try:
+            raise RuntimeError(
+                "All configured Gemini models are currently "
+                "quarantined or exhausted."
+            )
 
         last_err: Exception | None = None
         for current_model in models_to_try:
@@ -324,6 +332,10 @@ class JobGenerator:
 
                 except Exception as err:
                     last_err = err
+                    quarantined = breaker.record_failure(current_model, err)
+                    if quarantined:
+                        break
+
                     err_str = str(err)
                     if (
                         "503" in err_str
@@ -334,6 +346,10 @@ class JobGenerator:
                         continue
 
                     # Passe au modèle de secours
+                    print(
+                        f"⚠️ [Generator] Échec sur '{current_model}' ({err}), "
+                        "bascule sur le modèle suivant..."
+                    )
                     break
 
         raise RuntimeError(

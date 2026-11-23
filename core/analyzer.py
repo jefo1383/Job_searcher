@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from config.criteria import parse_search_criteria_file
 from config.settings import get_settings
+from core.circuit_breaker import get_circuit_breaker
 
 
 class JobAnalysisResult(BaseModel):
@@ -224,10 +225,17 @@ class JobAnalyzer:
             system_instruction=self._build_system_instruction(),
         )
 
-        models_to_try = [self.model_name]
-        for fallback in ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]:
-            if fallback not in models_to_try:
-                models_to_try.append(fallback)
+        breaker = get_circuit_breaker()
+        raw_models = get_settings().get_gemini_model_cascade(
+            self.model_name
+        )
+        models_to_try = breaker.filter_available_models(raw_models)
+
+        if not models_to_try:
+            raise RuntimeError(
+                "All configured Gemini models are currently "
+                "quarantined or exhausted."
+            )
 
         last_err: Exception | None = None
         for current_model in models_to_try:
@@ -255,6 +263,11 @@ class JobAnalyzer:
 
                 except Exception as err:
                     last_err = err
+                    quarantined = breaker.record_failure(current_model, err)
+                    if quarantined:
+                        # Modèle mort ou inexistant : passage immédiat au suivant
+                        break
+
                     err_str = str(err)
                     if (
                         "503" in err_str
@@ -265,6 +278,10 @@ class JobAnalyzer:
                         continue
 
                     # Passe au modèle alternatif en cas d'erreur de charge
+                    print(
+                        f"⚠️ [JobAnalyzer] Échec sur '{current_model}' ({err}), "
+                        "bascule sur le modèle suivant..."
+                    )
                     break
 
         raise RuntimeError(

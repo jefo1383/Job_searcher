@@ -161,6 +161,10 @@ class WorkdayScraper(BaseScraper):
                             if public_url in seen_urls:
                                 continue
 
+                            # Pré-filtrage rapide : élimine les postes distants
+                            if not self._is_location_allowed(locations_text):
+                                continue
+
                             # Vérification géographique (critères + rayon 25 km)
                             if not await self.location_matcher.is_location_allowed(
                                 raw_location=locations_text,

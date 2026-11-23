@@ -181,6 +181,7 @@ class ScraperEngine:
         inserted_count = 0
         excluded_title_count = 0
 
+        print(f"⏳ [{scraper.name}] Collecte en cours...")
         try:
             async for raw in scraper.scrape(
                 keywords=keywords,

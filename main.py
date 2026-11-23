@@ -90,7 +90,7 @@ class JobHunterOrchestrator:
         )
         self.generator = JobGenerator(
             api_key=self.settings.gemini_api_key.get_secret_value(),
-            model_name=self.settings.gemini_model,
+            model_name=self.settings.gemini_generator_model,
             profile_path=self.settings.candidate_profile_path,
         )
 
@@ -554,7 +554,7 @@ class JobHunterOrchestrator:
             )
             self.generator = JobGenerator(
                 api_key=self.settings.gemini_api_key.get_secret_value(),
-                model_name=self.settings.gemini_model,
+                model_name=self.settings.gemini_generator_model,
                 profile_path=self.settings.candidate_profile_path,
             )
             self.bot.generator = self.generator

@@ -13,6 +13,7 @@ INSTALL_DIR ?= $(HOME)/.local/bin
 VENV_DIR := .venv
 ARGS ?=
 PYINSTALLER_FLAGS ?= --onefile --name $(APP_NAME)
+export PLAYWRIGHT_BROWSERS_PATH ?= $(HOME)/.cache/ms-playwright
 
 .DEFAULT_GOAL := help
 

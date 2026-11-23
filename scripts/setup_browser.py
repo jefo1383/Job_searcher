@@ -84,40 +84,61 @@ def _get_playwright_revisions() -> tuple[str, str]:
 
 
 def _link_system_browser(system_browser: Path) -> None:
-    """Crée les liens symboliques dans le cache Playwright vers le binaire système.
+    """Crée les liens symboliques dans les caches Playwright vers le binaire système.
+
+    Inspecte PLAYWRIGHT_BROWSERS_PATH, XDG_CACHE_HOME et ~/.cache pour s'assurer
+    que le navigateur est immédiatement disponible, y compris sur les clusters
+    42 où /goinfre est un SSD local différent du Home NFS.
 
     Args:
         system_browser: Chemin vers le binaire Chromium ou Chrome.
     """
-    cache_base = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-    if cache_base:
-        pw_cache = Path(cache_base)
-    else:
-        pw_cache = Path.home() / ".cache" / "ms-playwright"
+    target_caches: set[Path] = set()
+
+    env_pw_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if env_pw_path:
+        target_caches.add(Path(env_pw_path).expanduser().resolve())
+
+    env_xdg = os.environ.get("XDG_CACHE_HOME")
+    if env_xdg:
+        target_caches.add(
+            (Path(env_xdg) / "ms-playwright").expanduser().resolve()
+        )
+
+    # Répertoire de cache standard dans le home
+    target_caches.add(
+        (Path.home() / ".cache" / "ms-playwright").expanduser().resolve()
+    )
 
     cr_rev, hs_rev = _get_playwright_revisions()
 
-    links_to_create = (
-        (pw_cache / f"chromium-{cr_rev}" / "chrome-linux64", "chrome"),
-        (
-            pw_cache
-            / f"chromium_headless_shell-{hs_rev}"
-            / "chrome-headless-shell-linux64",
-            "chrome-headless-shell",
-        ),
-    )
+    for pw_cache in sorted(target_caches):
+        links_to_create = (
+            (pw_cache / f"chromium-{cr_rev}" / "chrome-linux64", "chrome"),
+            (
+                pw_cache
+                / f"chromium_headless_shell-{hs_rev}"
+                / "chrome-headless-shell-linux64",
+                "chrome-headless-shell",
+            ),
+        )
 
-    for target_dir, link_name in links_to_create:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        link_path = target_dir / link_name
-        if link_path.is_symlink() or link_path.exists():
-            link_path.unlink()
-        link_path.symlink_to(system_browser)
+        for target_dir, link_name in links_to_create:
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                link_path = target_dir / link_name
+                if link_path.is_symlink() or link_path.exists():
+                    link_path.unlink()
+                link_path.symlink_to(system_browser)
+            except OSError as err:
+                print(
+                    f"⚠️ Erreur lors de la création du lien dans {target_dir}: {err}"
+                )
 
-    print(
-        f"✅ Navigateur système lié : {system_browser} -> {pw_cache} "
-        f"(révisions {cr_rev}/{hs_rev}, 0 Mo téléchargé)."
-    )
+        print(
+            f"✅ Navigateur système lié : {system_browser} -> {pw_cache} "
+            f"(révisions {cr_rev}/{hs_rev}, 0 Mo téléchargé)."
+        )
 
 
 def _install_playwright_browser() -> None:

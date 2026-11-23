@@ -1,7 +1,9 @@
 """Application configuration module using Pydantic Settings."""
 
 from functools import lru_cache
+import json
 from pathlib import Path
+from typing import Any
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,7 +16,8 @@ class Settings(BaseSettings):
 
     Attributes:
         gemini_api_key: Secret API key for Google AI Studio.
-        gemini_model: Gemini model identifier for job evaluation.
+        gemini_model: Primary Gemini model identifier for job evaluation.
+        gemini_fallback_models: Ordered list of fallback models on failure.
         match_score_threshold: Minimum score (0-100) to trigger human review.
         telegram_bot_token: Bot authentication token for Telegram alerts.
         telegram_chat_id: Target chat identifier for Telegram messages.
@@ -36,8 +39,22 @@ class Settings(BaseSettings):
         description="Google AI Studio API key.",
     )
     gemini_model: str = Field(
-        default="gemini-3.5-flash",
-        description="Target Gemini model identifier.",
+        default="gemini-3.8-flash",
+        description="Target primary model for screening and evaluation.",
+    )
+    gemini_generator_model: str = Field(
+        default="gemini-4-hydrogen",
+        description="High-tier model for cover letter and pitch generation.",
+    )
+    gemini_fallback_models: list[str] = Field(
+        default_factory=lambda: [
+            "gemini-3.5-flash",
+            "gemini-3.2-flash",
+            "gemini-3.1-flash",
+            "gemini-3.0-flash",
+            "gemini-2.0-flash",
+        ],
+        description="Fallback Gemini models cascade used on failure.",
     )
 
     # Seuil d'éligibilité pour le module Human-in-the-Loop
@@ -73,6 +90,55 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="La bonne alternance API bearer token.",
     )
+
+    @field_validator("gemini_fallback_models", mode="before")
+    @classmethod
+    def parse_fallback_models(cls, val: Any) -> list[str]:
+        """Parse fallback models from comma-separated string or list.
+
+        Args:
+            val: Raw value from environment or config.
+
+        Returns:
+            list[str]: Normalized list of model strings.
+        """
+        if isinstance(val, str):
+            clean_str = val.strip()
+            if clean_str.startswith("[") and clean_str.endswith("]"):
+                try:
+                    parsed = json.loads(clean_str)
+                    if isinstance(parsed, list):
+                        return [
+                            str(m).strip()
+                            for m in parsed
+                            if str(m).strip()
+                        ]
+                except Exception:
+                    pass
+            return [m.strip() for m in clean_str.split(",") if m.strip()]
+        if isinstance(val, (list, tuple)):
+            return [str(m).strip() for m in val if str(m).strip()]
+        return ["gemini-3.5-flash"]
+
+    def get_gemini_model_cascade(
+        self, primary_model: str | None = None
+    ) -> list[str]:
+        """Return the ordered, deduplicated list of Gemini models to attempt.
+
+        Args:
+            primary_model: Optional primary model overriding settings.
+
+        Returns:
+            list[str]: Deduplicated ordered list of model names.
+        """
+        first = primary_model or self.gemini_model
+        cascade = [first]
+        if self.gemini_model not in cascade:
+            cascade.append(self.gemini_model)
+        for fallback in self.gemini_fallback_models:
+            if fallback not in cascade:
+                cascade.append(fallback)
+        return cascade
 
     @field_validator("telegram_chat_id", mode="before")
     @classmethod

@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Final
 import unicodedata
 
 from google import genai
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from config.criteria import parse_search_criteria_file
 from config.settings import get_settings
+from core.circuit_breaker import get_circuit_breaker
 
 # API officielle Base Adresse Nationale (géocodage sans clé API)
 BAN_SEARCH_URL: str = "https://api-adresse.data.gouv.fr/search/"
@@ -23,6 +24,24 @@ DEFAULT_MAX_DISTANCE_KM: float = 30.0
 DEFAULT_RESIDENCE_LABEL: str = "Allauch (13190), France"
 DEFAULT_RESIDENCE_COORDS: tuple[float, float] = (43.341016, 5.485377)
 DEFAULT_TARGET_DEPARTMENT: str = "13"
+
+# Termes géographiques manifestement hors de la zone cible (Bouches-du-Rhône)
+DISTANT_GEO_TERMS: Final[tuple[str, ...]] = (
+    "germany", "deutschland", "allemagne",
+    "spain", "españa", "espagne",
+    "united kingdom", "royaume-uni", "england", "uk",
+    "united states", "usa", "états-unis",
+    "italy", "italia", "italie",
+    "belgium", "belgique", "switzerland", "suisse",
+    "china", "chine", "india", "inde",
+    "canada", "poland", "pologne",
+    "netherlands", "pays-bas",
+    "toulouse", "paris", "lyon", "bordeaux", "nantes",
+    "rennes", "lille", "strasbourg", "montpellier",
+    "grenoble", "nice", "brest", "clermont-ferrand",
+    "ile-de-france", "occitanie", "nouvelle-aquitaine",
+    "grand est", "bretagne", "normandie", "hauts-de-france",
+)
 
 # Mots-clés géographiques généraux (ne valent pas validation directe de ville)
 GENERIC_LOCATION_TOKENS: frozenset[str] = frozenset(
@@ -467,10 +486,10 @@ class LocationMatcher:
             temperature=0.0,
         )
 
-        models = [self.model_name]
-        for fb in ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite"):
-            if fb not in models:
-                models.append(fb)
+        settings = get_settings()
+        raw_models = settings.get_gemini_model_cascade(self.model_name)
+        breaker = get_circuit_breaker()
+        models = breaker.filter_available_models(raw_models)
 
         for model_id in models:
             try:
@@ -502,7 +521,8 @@ class LocationMatcher:
                         "source": "gemini",
                         "reason": parsed.reason,
                     }
-            except Exception:
+            except Exception as err:
+                breaker.record_failure(model_id, err)
                 continue
 
         return None
@@ -548,6 +568,20 @@ class LocationMatcher:
             return True
 
         cache_key = self._cache_key(raw_location)
+
+        # Rejet instantané pour les pays étrangers et métropoles distantes
+        if any(term in norm_raw for term in DISTANT_GEO_TERMS) and not any(
+            t in norm_raw
+            for t in ("13", "marseille", "aix", "remote", "teletravail")
+        ):
+            self._cache[cache_key] = {
+                "allowed": False,
+                "in_department": False,
+                "distance_km": None,
+                "source": "distant_heuristic",
+            }
+            return False
+
         cached = self._cache.get(cache_key)
         if cached is not None:
             return bool(cached.get("allowed", False))

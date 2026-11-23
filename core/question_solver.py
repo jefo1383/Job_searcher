@@ -10,6 +10,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
+from core.circuit_breaker import get_circuit_breaker
 
 
 class QuestionAnswerResult(BaseModel):
@@ -345,10 +346,11 @@ class ScreeningQuestionSolver:
             system_instruction=system_instruction,
         )
 
-        models_to_try = [self.model_name]
-        for fallback in ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]:
-            if fallback not in models_to_try:
-                models_to_try.append(fallback)
+        breaker = get_circuit_breaker()
+        raw_models = get_settings().get_gemini_model_cascade(
+            self.model_name
+        )
+        models_to_try = breaker.filter_available_models(raw_models)
 
         for current_model in models_to_try:
             for attempt in range(2):
@@ -371,6 +373,10 @@ class ScreeningQuestionSolver:
                         )
                     return None
                 except Exception as err:
+                    quarantined = breaker.record_failure(current_model, err)
+                    if quarantined:
+                        break
+
                     err_str = str(err)
                     if (
                         "503" in err_str
@@ -379,6 +385,10 @@ class ScreeningQuestionSolver:
                     ) and attempt < 1:
                         await asyncio.sleep(1.0)
                         continue
+                    print(
+                        f"⚠️ [QuestionSolver] Échec sur '{current_model}' "
+                        f"({err}), bascule sur le modèle suivant..."
+                    )
                     break
 
         return None

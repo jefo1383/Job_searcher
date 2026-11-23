@@ -11,6 +11,7 @@ from google.genai import types
 
 from config.criteria import SearchCriteria, parse_search_criteria_file
 from config.settings import Settings, get_settings
+from core.circuit_breaker import get_circuit_breaker
 
 # Namespaces XML standard OpenXML pour les fichiers Word .docx
 DOCX_NAMESPACE: dict[str, str] = {
@@ -211,15 +212,35 @@ class ProfileBuilder:
         )
         contents.append(instructions)
 
-        response = await self.client.aio.models.generate_content(
-            model=self.settings.gemini_model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-            ),
-        )
+        breaker = get_circuit_breaker()
+        raw_models = self.settings.get_gemini_model_cascade()
+        models_to_try = breaker.filter_available_models(raw_models)
+        markdown_text = ""
+        last_err: Exception | None = None
+        for current_model in models_to_try:
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=current_model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        temperature=0.2,
+                    ),
+                )
+                if response and response.text:
+                    markdown_text = response.text
+                    break
+            except Exception as err:
+                last_err = err
+                breaker.record_failure(current_model, err)
+                print(
+                    f"⚠️ [ProfileBuilder] Échec sur '{current_model}' ({err}), "
+                    "bascule sur le modèle suivant..."
+                )
 
-        markdown_text = response.text or ""
+        if not markdown_text and last_err:
+            raise RuntimeError(
+                f"Failed to generate profile markdown: {last_err}"
+            )
         # Nettoyage d'éventuels backticks de bloc ```markdown
         cleaned = re.sub(
             r"^```markdown\s*", "", markdown_text, flags=re.IGNORECASE
